@@ -56,6 +56,12 @@
 #include "bpf_gen_internal.h"
 #include "zip.h"
 
+// Customization:
+// was fmemopen@GLIBC_2.2.22,
+// enforce symbol version as linux agent works with GLIBC_2.19
+// refer to fmemopen(3)
+__asm__(".symver fmemopen,fmemopen@GLIBC_2.2.5");
+
 #ifndef BPF_FS_MAGIC
 #define BPF_FS_MAGIC		0xcafe4a11
 #endif
