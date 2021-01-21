@@ -893,33 +893,6 @@ enum libbpf_tristate {
 	TRI_YES = 1,
 	TRI_MODULE = 2,
 };
-// Customization:
-/*
- * libbpf does all kinds of probing as part of its flow.
- *
- * This function configures the prog_type used by
- * relevant *probe_* functions.
- *
- * This way, if eBPF program uses a specific bpf_prog_type,
- * it's possible to configure libbpf *probe_* functions to use SAME type.
- *
- * Thus, extends libbpf portability, as on old kernels/distros
- * not all bpf_prog_types are supported and using unexpected bpf_prog_type
- * might result in bpf syscall error, failing the whole program.
- *
- * IMPORTANT:
- *   - call this function at most ONCE in your program
- *     and BEFORE using libbpf API
- */
-LIBBPF_API bool libbpf_set_once_probe_prog_type(enum bpf_prog_type type);
-
-// Customization:
-/*
- *  if 'libbpf_set_once_probe_prog_type' was called before,
- *  this function will return the pre-configured type,
- *  otherwise, given 'default_type' is returned
- */
-LIBBPF_API enum bpf_prog_type libbpf_get_probe_prog_type(enum bpf_prog_type default_type);
 
 struct bpf_linker_opts {
 	/* size of this struct, for forward/backward compatiblity */
@@ -941,6 +914,52 @@ LIBBPF_API int bpf_linker__add_file(struct bpf_linker *linker,
 				    const struct bpf_linker_file_opts *opts);
 LIBBPF_API int bpf_linker__finalize(struct bpf_linker *linker);
 LIBBPF_API void bpf_linker__free(struct bpf_linker *linker);
+
+// Customization:
+/*
+ * libbpf does all kinds of probing as part of its flow.
+ *
+ * This function configures the prog_type used by
+ * relevant *probe_* functions.
+ *
+ * This way, if eBPF program uses a specific bpf_prog_type,
+ * it's possible to configure libbpf *probe_* functions to use SAME type.
+ *
+ * Thus, extends libbpf portability, as on old kernels/distros
+ * not all bpf_prog_types are supported and using unexpected bpf_prog_type
+ * might result in bpf syscall error, failing the whole program.
+ *
+ * IMPORTANT:
+ *   - call this function at most ONCE in your program
+ *     and BEFORE using libbpf API
+ */
+LIBBPF_API bool libbpf_set_once_probe_prog_type(enum bpf_prog_type type);
+LIBBPF_API enum bpf_prog_type libbpf_get_probe_prog_type(enum bpf_prog_type default_type);
+
+// Customization:
+/*
+ * On few old kernels, when using BPF_PROG_TYPE_KPROBE,
+ * kernel version MUST be populated as well.
+ *
+ * Thus, '*_probe_*' functions using BPF_PROG_TYPE_KPROBE,
+ * should populate attr.kern_version as well.
+ * 
+ * This function enables this logic.
+ *
+ * IMPORTANT:
+ *   - call this function at most ONCE in your program
+ *     and BEFORE using libbpf API
+ *   - refer also to bpf_load_program_xattr()
+ */
+LIBBPF_API bool libbpf_set_once_enable_probe_with_kernel_version();
+
+// Customization:
+/*
+ *  If enabled and it's BPF_PROG_TYPE_KPROBE type,
+ *  return detected kernel version (using 'uname'),
+ *  otherwise returns 0
+ */
+LIBBPF_API __u32 libbpf_get_kprobe_kernel_version(enum bpf_prog_type type);
 
 #ifdef __cplusplus
 } /* extern "C" */
