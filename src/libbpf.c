@@ -72,6 +72,14 @@ enum bpf_prog_type customized_probe_prog_type = BPF_PROG_TYPE_UNSPEC;
 // Customization:
 bool probe_with_kernel_version_enabled = false;
 
+// Customization:
+// so [k,u]probe location will be: /sys/kernel/debug/tracing/events/s1_ebpf/<probe name>
+const char * ebpf_group_prefix = "s1_ebpf";
+const char * kprobe_events = "/sys/kernel/debug/tracing/kprobe_events";
+const char * uprobe_events = "/sys/kernel/debug/tracing/uprobe_events";
+const char * kprobe_event_source_type = "/sys/bus/event_source/devices/kprobe/type";
+const char * uprobe_event_source_type = "/sys/bus/event_source/devices/uprobe/type";
+
 #ifndef EM_BPF
 #define EM_BPF 247
 #endif
@@ -9488,7 +9496,282 @@ struct bpf_link {
 	char *pin_path;		/* NULL, if not pinned */
 	int fd;			/* hook FD, -1 if not applicable */
 	bool disconnected;
+	bool uprobe;
+	char *debugfs_name; /* NULL, unless [k,u]probe was defined using debugfs */
 };
+
+// Customization:
+static bool exists(const char * file)
+{
+	return access(file, F_OK) == 0;
+}
+
+// Customization:
+static int append_to(const char *file, const char *data, size_t sz, bool log_failure)
+{
+	char buf[STRERR_BUFSIZE];
+	int fd, err, ret;
+	ssize_t written;
+
+	fd = open(file, O_WRONLY | O_APPEND | O_CLOEXEC);
+	if (fd < 0 && log_failure) {
+		err = -errno;
+		pr_warn("failed to open '%s': %s\n",
+		        file,
+		        libbpf_strerror_r(err, buf, sizeof(buf)));
+		return err;
+	}
+
+	written = write(fd, data, sz);
+	ret = written == sz ? 0 : -1;
+
+	if (ret < 0 && log_failure) {
+		pr_warn("failed to append '%s' to '%s'\n", data, file);
+	}
+
+	close(fd);
+	return ret;
+}
+
+// Customization:
+/*
+ * Clear [k,u]probe from [k,u]probe_events file
+ */
+static int debugfs_clear_probe(
+	bool uprobe,
+	const char *name,
+	bool log_failure)
+{
+	char buf[STRERR_BUFSIZE];
+	int err, written;	
+	char probe[1024];
+
+	written = snprintf(probe, sizeof(probe),
+		"-:%s/%s",
+		ebpf_group_prefix,
+		name);
+
+	if (written < 0 && log_failure) {
+		err = -errno;
+		pr_warn("failed to create %s clear cmd: %s\n",
+		        (uprobe ? "uprobe" : "kprobe"),
+		        libbpf_strerror_r(err, buf, sizeof(buf)));
+		return err;
+	}
+
+	pr_debug("clearing %s: %s\n",
+	         (uprobe ? "uprobe" : "kprobe"),
+			 probe);
+
+	const char * probe_events = uprobe ? uprobe_events : kprobe_events;
+
+	return append_to(probe_events, probe, written, log_failure);
+}
+
+// Customization:
+/*
+ * Set kprobe
+ * 
+ * Reference:
+ *  https://www.kernel.org/doc/Documentation/trace/kprobetrace.txt
+ */
+static int debugfs_set_kprobe(
+	bool retprobe,
+	const char *name)
+{
+	char buf[STRERR_BUFSIZE];
+	int err, written;
+	char kprobe[1024];
+
+	written = snprintf(kprobe, sizeof(kprobe),
+		"%c:%s/%s %s",
+		(retprobe ? 'r' : 'p'),
+		ebpf_group_prefix,
+		name,
+		name);
+
+	if (written < 0) {
+		err = -errno;
+		pr_warn("failed to create %s '%s' definition: %s\n",
+		        (retprobe ? "kretprobe" : "kprobe"),
+		        name,
+		        libbpf_strerror_r(err, buf, sizeof(buf)));
+		return err;
+	}
+
+	pr_debug("setting %s: %s\n",
+	         (retprobe ? "kretprobe" : "kprobe"),
+	         kprobe);
+
+	return append_to(kprobe_events, kprobe, written, true);
+}
+
+// Customization:
+/*
+ * Create uprobe
+ * 
+ * Reference:
+ *  https://www.kernel.org/doc/Documentation/trace/uprobetracer.txt
+ */
+static int debugfs_set_uprobe(
+	bool retprobe,
+	const char *name,
+	const char *binary_path,
+	uint64_t offset)
+{
+	char buf[STRERR_BUFSIZE];
+	int err, written;
+	char uprobe[1024];
+
+	written = snprintf(uprobe, sizeof(uprobe),
+		"%c:%s/%s %s:0x%zx",
+		(retprobe ? 'r' : 'p'),
+		ebpf_group_prefix,
+		name,
+		binary_path,
+		offset);
+
+	if (written < 0) {
+		err = -errno;
+		pr_warn("failed to create %s '%s, %s, 0x%zx' definition: %s\n",
+		        (retprobe ? "uretprobe" : "uprobe"),
+		        binary_path,
+		        name,
+		        offset,
+		        libbpf_strerror_r(err, buf, sizeof(buf)));
+		return err;
+	}
+
+	pr_debug("setting %s: %s\n",
+	         (retprobe ? "uretprobe" : "uprobe"),
+	         uprobe);
+
+	return append_to(uprobe_events, uprobe, written, true);
+}
+
+// Customization:
+/*
+ * Append to [k,u]probe_events file a [k,u]probe definition
+ */
+static int debugfs_set_probe(
+	bool uprobe,
+	bool retprobe,
+	const char *name,
+	const char *binary_path,
+	uint64_t offset)
+{
+	// clears any previous probe event
+	debugfs_clear_probe(uprobe, name, false);
+
+	return uprobe ? debugfs_set_uprobe(retprobe, name, binary_path, offset) :
+	                debugfs_set_kprobe(retprobe, name);
+}
+
+/*
+ * this function is expected to parse integer in the range of [0, 2^31-1] from
+ * given file using scanf format string fmt. If actual parsed value is
+ * negative, the result might be indistinguishable from error
+ */
+static int parse_uint_from_file(const char *file, const char *fmt)
+{
+	char buf[STRERR_BUFSIZE];
+	int err, ret;
+	FILE *f;
+
+	f = fopen(file, "r");
+	if (!f) {
+		err = -errno;
+		pr_debug("failed to open '%s': %s\n", file,
+			 libbpf_strerror_r(err, buf, sizeof(buf)));
+		return err;
+	}
+	err = fscanf(f, fmt, &ret);
+	if (err != 1) {
+		err = err == EOF ? -EIO : -errno;
+		pr_debug("failed to parse '%s': %s\n", file,
+			libbpf_strerror_r(err, buf, sizeof(buf)));
+		fclose(f);
+		return err;
+	}
+	fclose(f);
+	return ret;
+}
+
+static int determine_tracepoint_id(const char *tp_category,
+				   const char *tp_name)
+{
+	char file[PATH_MAX];
+	int ret;
+
+	ret = snprintf(file, sizeof(file),
+		       "/sys/kernel/debug/tracing/events/%s/%s/id",
+		       tp_category, tp_name);
+	if (ret < 0)
+		return -errno;
+	if (ret >= sizeof(file)) {
+		pr_debug("tracepoint %s/%s path is too long\n",
+			 tp_category, tp_name);
+		return -E2BIG;
+	}
+	return parse_uint_from_file(file, "%d\n");
+}
+
+// Customization:
+/*
+ * Kernels prior to 4.17 use debugfs to define uprobe/kprobe events,
+ * since no support of dynamic PMU (refer to perf_event_open(2))
+ */
+static int debugfs_perf_event_open_probe(
+	bool uprobe,
+	bool retprobe,
+	const char *name,
+	const char *binary_path,
+	uint64_t offset,
+	int pid)
+{
+	struct perf_event_attr attr = {};
+	char errmsg[STRERR_BUFSIZE];
+	int pfd, ret, id, err;
+
+	pr_debug("creating '%s' %c%sprobe, debugfs approach\n",
+			 name,
+			 (uprobe ? 'u' : 'k'),
+			 (retprobe ? "ret" : ""));
+
+	attr.type = PERF_TYPE_TRACEPOINT;
+	attr.sample_type = PERF_SAMPLE_RAW;
+	attr.sample_period = 1;
+	attr.wakeup_events = 1;
+	attr.size = sizeof(attr);
+
+	ret = debugfs_set_probe(uprobe, retprobe, name, binary_path, offset);
+	if (ret < 0) {
+		return ret;
+	}
+
+	id = determine_tracepoint_id(ebpf_group_prefix, name);
+	if (id < 0) {
+		return id;
+	}
+	attr.config = id;
+	pr_debug("probe '%s' config id: %d\n", name, id);
+
+	pfd = syscall(__NR_perf_event_open, &attr,
+		          pid < 0 ? -1 : pid /* pid */,
+		          pid == -1 ? 0 : -1 /* cpu */,
+		          -1 /* group_fd */,
+		          PERF_FLAG_FD_CLOEXEC);
+	if (pfd < 0) {
+		err = -errno;
+		pr_warn("perf_event_open() for '%s' %s failed: %s\n",
+			name,
+			uprobe ? "uprobe" : "kprobe",
+			libbpf_strerror_r(err, errmsg, sizeof(errmsg)));
+		return err;
+	}
+
+	return pfd;
+}
 
 /* Replace link's underlying BPF program with the new one */
 int bpf_link__update_program(struct bpf_link *link, struct bpf_program *prog)
@@ -9630,11 +9913,20 @@ static int bpf_link__detach_perf_event(struct bpf_link *link)
 		err = -errno;
 
 	close(link->fd);
+
+	if (link->debugfs_name != NULL) {
+		err = debugfs_clear_probe(link->uprobe, link->debugfs_name, true);
+		free(link->debugfs_name);
+	}
+
 	return err;
 }
 
-struct bpf_link *bpf_program__attach_perf_event(struct bpf_program *prog,
-						int pfd)
+struct bpf_link *bpf_program__attach_perf_event(
+	struct bpf_program *prog,
+	int pfd,
+	bool uprobe,
+	const char * debugfs_name)
 {
 	char errmsg[STRERR_BUFSIZE];
 	struct bpf_link *link;
@@ -9657,6 +9949,21 @@ struct bpf_link *bpf_program__attach_perf_event(struct bpf_program *prog,
 		return ERR_PTR(-ENOMEM);
 	link->detach = &bpf_link__detach_perf_event;
 	link->fd = pfd;
+	link->uprobe = uprobe;
+	link->debugfs_name = NULL;
+
+	// if [k,u]probe was created using debugfs method,
+	// store relevant attributes for detach logic
+	if (debugfs_name != NULL) {
+		link->debugfs_name = strdup(debugfs_name);
+		if (link->debugfs_name == NULL) {
+			err = -errno;
+			free(link);
+			pr_warn("prog '%s': attach to pfd %d, strdup failed: %s\n",
+				prog->name, pfd, libbpf_strerror_r(err, errmsg, sizeof(errmsg)));
+			return ERR_PTR(err);
+		}
+	}
 
 	if (ioctl(pfd, PERF_EVENT_IOC_SET_BPF, prog_fd) < 0) {
 		err = -errno;
@@ -9676,36 +9983,6 @@ struct bpf_link *bpf_program__attach_perf_event(struct bpf_program *prog,
 		return ERR_PTR(err);
 	}
 	return link;
-}
-
-/*
- * this function is expected to parse integer in the range of [0, 2^31-1] from
- * given file using scanf format string fmt. If actual parsed value is
- * negative, the result might be indistinguishable from error
- */
-static int parse_uint_from_file(const char *file, const char *fmt)
-{
-	char buf[STRERR_BUFSIZE];
-	int err, ret;
-	FILE *f;
-
-	f = fopen(file, "r");
-	if (!f) {
-		err = -errno;
-		pr_debug("failed to open '%s': %s\n", file,
-			 libbpf_strerror_r(err, buf, sizeof(buf)));
-		return err;
-	}
-	err = fscanf(f, fmt, &ret);
-	if (err != 1) {
-		err = err == EOF ? -EIO : -errno;
-		pr_debug("failed to parse '%s': %s\n", file,
-			libbpf_strerror_r(err, buf, sizeof(buf)));
-		fclose(f);
-		return err;
-	}
-	fclose(f);
-	return ret;
 }
 
 static int determine_kprobe_perf_type(void)
@@ -9736,12 +10013,20 @@ static int determine_uprobe_retprobe_bit(void)
 	return parse_uint_from_file(file, "config:%d\n");
 }
 
-static int perf_event_open_probe(bool uprobe, bool retprobe, const char *name,
+/*
+ * perf_event_open(2) supports [k,u]probe dynamic PMU from kernel v4.17
+ */
+static int dynamic_pmu_perf_event_open_probe(bool uprobe, bool retprobe, const char *name,
 				 uint64_t offset, int pid)
 {
 	struct perf_event_attr attr = {};
 	char errmsg[STRERR_BUFSIZE];
 	int type, pfd, err;
+
+	pr_debug("creating '%s' %c%sprobe, dynamic PMU approach\n",
+			 name,
+			 (uprobe ? 'u' : 'k'),
+			 (retprobe ? "ret" : ""));
 
 	type = uprobe ? determine_uprobe_perf_type()
 		      : determine_kprobe_perf_type();
@@ -9783,23 +10068,69 @@ static int perf_event_open_probe(bool uprobe, bool retprobe, const char *name,
 	return pfd;
 }
 
-struct bpf_link *bpf_program__attach_kprobe(struct bpf_program *prog,
-					    bool retprobe,
-					    const char *func_name)
+/*
+ * perf_event_open_probe() creates k[ret]probe/u[ret]probe,
+ * represented by matching fd, to which eBPF program can be attached.
+ * 
+ * There are two possible approaches:
+ * - dynamic PMU (supported only from v4.17)
+ * - debugfs
+ * 
+ * NOTE:
+ *  when undelying debugfs approach is called,
+ *  parameter meaning is as shown in below example:
+ *   echo 'p:zfree_entry /bin/zsh:0x46420 %ip %ax' > uprobe_events
+ *
+ *   'name'        -> zfree_entry
+ *   'binary_path' -> /bin/zsh
+ */
+static int perf_event_open_probe(bool uprobe, bool retprobe, const char *name,
+				 const char * binary_path, uint64_t offset, int pid)
+{
+	bool dynamic_pmu_kprobe = !uprobe && exists(kprobe_event_source_type);
+	bool dynamic_pmu_uprobe = uprobe && exists(uprobe_event_source_type);
+	bool debugfs_kprobe = !uprobe && exists(kprobe_events);
+	bool debugfs_uprobe = uprobe && exists(uprobe_events);
+
+	int pfd = -1;
+
+	if (dynamic_pmu_kprobe) {
+		pfd = dynamic_pmu_perf_event_open_probe(uprobe, retprobe, name, offset, pid);
+	} else if (dynamic_pmu_uprobe) {
+		pfd = dynamic_pmu_perf_event_open_probe(uprobe, retprobe, binary_path, offset, pid);
+	} else if (debugfs_kprobe || debugfs_uprobe) {
+		pfd = debugfs_perf_event_open_probe(uprobe, retprobe, name, binary_path, offset, pid);
+	} else {
+		pr_warn("No eBPF [k,u]probe support. Can't create '%s' %c%sprobe\n",
+				 name,
+				 (uprobe ? 'u' : 'k'),
+				 (retprobe ? "ret" : ""));
+	}
+
+	return pfd;
+}
+
+struct bpf_link *bpf_program__attach_kprobe(
+	struct bpf_program *prog,
+	bool retprobe,
+	const char *func_name)
 {
 	char errmsg[STRERR_BUFSIZE];
 	struct bpf_link *link;
 	int pfd, err;
 
 	pfd = perf_event_open_probe(false /* uprobe */, retprobe, func_name,
-				    0 /* offset */, -1 /* pid */);
+				    NULL /* binary_path */, 0 /* offset */, -1 /* pid */);
 	if (pfd < 0) {
 		pr_warn("prog '%s': failed to create %s '%s' perf event: %s\n",
 			prog->name, retprobe ? "kretprobe" : "kprobe", func_name,
 			libbpf_strerror_r(pfd, errmsg, sizeof(errmsg)));
 		return ERR_PTR(pfd);
 	}
-	link = bpf_program__attach_perf_event(prog, pfd);
+
+	const char * name = exists(kprobe_event_source_type) ? NULL : func_name;
+
+	link = bpf_program__attach_perf_event(prog, pfd, false, name);
 	if (IS_ERR(link)) {
 		close(pfd);
 		err = PTR_ERR(link);
@@ -9808,6 +10139,7 @@ struct bpf_link *bpf_program__attach_kprobe(struct bpf_program *prog,
 			libbpf_strerror_r(err, errmsg, sizeof(errmsg)));
 		return link;
 	}
+
 	return link;
 }
 
@@ -9823,8 +10155,14 @@ static struct bpf_link *attach_kprobe(const struct bpf_sec_def *sec,
 	return bpf_program__attach_kprobe(prog, retprobe, func_name);
 }
 
+// TODO add attach_uprobe() which does:
+//      - parse from section name: binary_path + func_name
+//      - calculate target offset
+//      - calls bpf_program__attach_uprobe
+
 struct bpf_link *bpf_program__attach_uprobe(struct bpf_program *prog,
 					    bool retprobe, pid_t pid,
+					    const char *func_name,
 					    const char *binary_path,
 					    size_t func_offset)
 {
@@ -9832,16 +10170,19 @@ struct bpf_link *bpf_program__attach_uprobe(struct bpf_program *prog,
 	struct bpf_link *link;
 	int pfd, err;
 
-	pfd = perf_event_open_probe(true /* uprobe */, retprobe,
+	pfd = perf_event_open_probe(true /* uprobe */, retprobe, func_name,
 				    binary_path, func_offset, pid);
 	if (pfd < 0) {
-		pr_warn("prog '%s': failed to create %s '%s:0x%zx' perf event: %s\n",
-			prog->name, retprobe ? "uretprobe" : "uprobe",
+		pr_warn("prog '%s': failed to create %s '%s:%s 0x%zx' perf event: %s\n",
+			prog->name, retprobe ? "uretprobe" : "uprobe", func_name,
 			binary_path, func_offset,
 			libbpf_strerror_r(pfd, errmsg, sizeof(errmsg)));
 		return ERR_PTR(pfd);
 	}
-	link = bpf_program__attach_perf_event(prog, pfd);
+
+	const char * name = exists(uprobe_event_source_type) ? NULL : binary_path;
+
+	link = bpf_program__attach_perf_event(prog, pfd, true, name);
 	if (IS_ERR(link)) {
 		close(pfd);
 		err = PTR_ERR(link);
@@ -9851,26 +10192,8 @@ struct bpf_link *bpf_program__attach_uprobe(struct bpf_program *prog,
 			libbpf_strerror_r(err, errmsg, sizeof(errmsg)));
 		return link;
 	}
+
 	return link;
-}
-
-static int determine_tracepoint_id(const char *tp_category,
-				   const char *tp_name)
-{
-	char file[PATH_MAX];
-	int ret;
-
-	ret = snprintf(file, sizeof(file),
-		       "/sys/kernel/debug/tracing/events/%s/%s/id",
-		       tp_category, tp_name);
-	if (ret < 0)
-		return -errno;
-	if (ret >= sizeof(file)) {
-		pr_debug("tracepoint %s/%s path is too long\n",
-			 tp_category, tp_name);
-		return -E2BIG;
-	}
-	return parse_uint_from_file(file, "%d\n");
 }
 
 static int perf_event_open_tracepoint(const char *tp_category,
@@ -9919,7 +10242,7 @@ struct bpf_link *bpf_program__attach_tracepoint(struct bpf_program *prog,
 			libbpf_strerror_r(pfd, errmsg, sizeof(errmsg)));
 		return ERR_PTR(pfd);
 	}
-	link = bpf_program__attach_perf_event(prog, pfd);
+	link = bpf_program__attach_perf_event(prog, pfd, false, NULL);
 	if (IS_ERR(link)) {
 		close(pfd);
 		err = PTR_ERR(link);
