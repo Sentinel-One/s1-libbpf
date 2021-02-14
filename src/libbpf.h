@@ -236,13 +236,14 @@ LIBBPF_API int bpf_link__destroy(struct bpf_link *link);
 LIBBPF_API struct bpf_link *
 bpf_program__attach(struct bpf_program *prog);
 LIBBPF_API struct bpf_link *
-bpf_program__attach_perf_event(struct bpf_program *prog, int pfd);
+bpf_program__attach_perf_event(struct bpf_program *prog, int pfd,
+			bool uprobe, const char * name_legacy);
 LIBBPF_API struct bpf_link *
 bpf_program__attach_kprobe(struct bpf_program *prog, bool retprobe,
 			   const char *func_name);
 LIBBPF_API struct bpf_link *
 bpf_program__attach_uprobe(struct bpf_program *prog, bool retprobe,
-			   pid_t pid, const char *binary_path,
+			   pid_t pid, const char *func_name, const char *binary_path,
 			   size_t func_offset);
 LIBBPF_API struct bpf_link *
 bpf_program__attach_tracepoint(struct bpf_program *prog,
