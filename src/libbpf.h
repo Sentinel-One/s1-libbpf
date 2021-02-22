@@ -255,12 +255,13 @@ struct bpf_perf_event_opts {
 
 LIBBPF_API struct bpf_link *
 bpf_program__attach_perf_event(struct bpf_program *prog, int pfd,
-			bool uprobe, const char * debugfs_name);
+			bool uprobe, bool retprobe, const char * debugfs_name);
 
 LIBBPF_API struct bpf_link *
 bpf_program__attach_perf_event_opts(struct bpf_program *prog, int pfd,
 				    const struct bpf_perf_event_opts *opts,
                     bool uprobe,
+                    bool retprobe,
                     const char * debugfs_name);
 
 struct bpf_kprobe_opts {
@@ -300,9 +301,8 @@ struct bpf_uprobe_opts {
 #define bpf_uprobe_opts__last_field retprobe
 
 LIBBPF_API struct bpf_link *
-bpf_program__attach_uprobe(struct bpf_program *prog, bool retprobe,
-			   pid_t pid, const char *func_name, const char *binary_path,
-			   size_t func_offset);
+bpf_program__attach_uprobe(struct bpf_program *prog, bool retprobe, pid_t pid,
+			   const char *func_name, const char *binary_path, size_t func_offset);
 LIBBPF_API struct bpf_link *
 bpf_program__attach_uprobe_opts(struct bpf_program *prog, pid_t pid,
 				const char *func_name, const char *binary_path, size_t func_offset,

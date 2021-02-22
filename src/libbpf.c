@@ -2988,6 +2988,35 @@ static Elf_Scn *elf_sec_by_name(const struct bpf_object *obj, const char *name)
 	return NULL;
 }
 
+static bool elf_sym_by_name(
+                            const struct bpf_object *obj, 
+                            const char *symbol_name,
+                            GElf_Sym *sym)
+{
+    Elf_Data *symbols = obj->efile.symbols;
+    size_t n = symbols->d_size / sizeof(GElf_Sym);
+    const char * name;
+    int i;
+
+    for (i = 0; i < n; i++) {
+        if (!gelf_getsym(symbols, i, sym)) {
+            return false;
+        }
+
+        name = elf_sym_str(obj, sym->st_name);
+        if (name == NULL) {
+            return false;
+        }
+
+        if (!strcmp(symbol_name, name) &&
+            sym->st_size != 0) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 static int elf_sec_hdr(const struct bpf_object *obj, Elf_Scn *scn, GElf_Shdr *hdr)
 {
 	if (!scn)
@@ -8055,6 +8084,8 @@ void bpf_program__set_expected_attach_type(struct bpf_program *prog,
 
 static struct bpf_link *attach_kprobe(const struct bpf_sec_def *sec,
 				      struct bpf_program *prog);
+static struct bpf_link *attach_uprobe(const struct bpf_sec_def *sec,
+				      struct bpf_program *prog);					  
 static struct bpf_link *attach_tp(const struct bpf_sec_def *sec,
 				  struct bpf_program *prog);
 static struct bpf_link *attach_raw_tp(const struct bpf_sec_def *sec,
@@ -8074,10 +8105,12 @@ static const struct bpf_sec_def section_defs[] = {
 						BPF_SK_REUSEPORT_SELECT),
 	SEC_DEF("kprobe/", KPROBE,
 		.attach_fn = attach_kprobe),
-	BPF_PROG_SEC("uprobe/",			BPF_PROG_TYPE_KPROBE),
 	SEC_DEF("kretprobe/", KPROBE,
 		.attach_fn = attach_kprobe),
-	BPF_PROG_SEC("uretprobe/",		BPF_PROG_TYPE_KPROBE),
+	SEC_DEF("uprobe/", KPROBE,
+		.attach_fn = attach_uprobe),
+	SEC_DEF("uretprobe/", KPROBE,
+		.attach_fn = attach_uprobe),
 	BPF_PROG_SEC("classifier",		BPF_PROG_TYPE_SCHED_CLS),
 	BPF_PROG_SEC("action",			BPF_PROG_TYPE_SCHED_ACT),
 	SEC_DEF("tracepoint/", TRACEPOINT,
@@ -8997,6 +9030,7 @@ struct bpf_link {
 	int fd;			/* hook FD, -1 if not applicable */
 	bool disconnected;
 	bool uprobe;
+	bool retprobe;
 	char *debugfs_name; /* NULL, unless [k,u]probe was defined using debugfs */
 };
 
@@ -9040,6 +9074,7 @@ static int append_to(const char *file, const char *data, size_t sz, bool log_fai
 static int debugfs_clear_probe(
 	bool uprobe,
 	const char *name,
+	bool retprobe,
 	bool log_failure)
 {
 	char buf[STRERR_BUFSIZE];
@@ -9047,14 +9082,16 @@ static int debugfs_clear_probe(
 	char probe[1024];
 
 	written = snprintf(probe, sizeof(probe),
-		"-:%s/%s",
+		"-:%s/%s%s",
 		ebpf_group_prefix,
-		name);
+		name,
+		(retprobe ? "_exit" : "_enter"));
 
 	if (written < 0 && log_failure) {
 		err = -errno;
-		pr_warn("failed to create %s clear cmd: %s\n",
-		        (uprobe ? "uprobe" : "kprobe"),
+		pr_warn("failed to create %c%sprobe clear cmd: %s\n",
+		        (uprobe ? 'u' : 'k'),
+				(retprobe ? "ret" : ""),
 		        libbpf_strerror_r(err, buf, sizeof(buf)));
 		return err;
 	}
@@ -9084,10 +9121,11 @@ static int debugfs_set_kprobe(
 	char kprobe[1024];
 
 	written = snprintf(kprobe, sizeof(kprobe),
-		"%c:%s/%s %s",
+		"%c:%s/%s%s %s",
 		(retprobe ? 'r' : 'p'),
 		ebpf_group_prefix,
 		name,
+		(retprobe ? "_exit" : "_enter"),
 		name);
 
 	if (written < 0) {
@@ -9124,10 +9162,11 @@ static int debugfs_set_uprobe(
 	char uprobe[1024];
 
 	written = snprintf(uprobe, sizeof(uprobe),
-		"%c:%s/%s %s:0x%zx",
+		"%c:%s/%s%s %s:0x%zx",
 		(retprobe ? 'r' : 'p'),
 		ebpf_group_prefix,
 		name,
+		(retprobe ? "_exit" : "_enter"),
 		binary_path,
 		offset);
 
@@ -9161,7 +9200,7 @@ static int debugfs_set_probe(
 	uint64_t offset)
 {
 	// clears any previous probe event
-	debugfs_clear_probe(uprobe, name, false);
+	debugfs_clear_probe(uprobe, name, retprobe, false);
 
 	return uprobe ? debugfs_set_uprobe(retprobe, name, binary_path, offset) :
 	                debugfs_set_kprobe(retprobe, name);
@@ -9198,14 +9237,15 @@ static int parse_uint_from_file(const char *file, const char *fmt)
 }
 
 static int determine_tracepoint_id(const char *tp_category,
-				   const char *tp_name)
+				   const char *tp_name,
+				   const char *suffix)
 {
 	char file[PATH_MAX];
 	int ret;
 
 	ret = snprintf(file, sizeof(file),
-		       "/sys/kernel/debug/tracing/events/%s/%s/id",
-		       tp_category, tp_name);
+		       "/sys/kernel/debug/tracing/events/%s/%s%s/id",
+		       tp_category, tp_name, (suffix == NULL ? "" : suffix));
 	if (ret < 0)
 		return -errno;
 	if (ret >= sizeof(file)) {
@@ -9249,7 +9289,9 @@ static int debugfs_perf_event_open_probe(
 		return ret;
 	}
 
-	id = determine_tracepoint_id(ebpf_group_prefix, name);
+	id = determine_tracepoint_id(ebpf_group_prefix,
+								 name,
+								 (retprobe ? "_exit" : "_enter"));
 	if (id < 0) {
 		return id;
 	}
@@ -9426,7 +9468,7 @@ static int bpf_link_perf_detach(struct bpf_link *link)
 	close(link->fd);
 
 	if (link->debugfs_name != NULL) {
-		err = debugfs_clear_probe(link->uprobe, link->debugfs_name, true);
+		err = debugfs_clear_probe(link->uprobe, link->debugfs_name, link->retprobe, true);
 		free(link->debugfs_name);
 	}
 
@@ -9445,6 +9487,7 @@ struct bpf_link *bpf_program__attach_perf_event_opts(
 	int pfd,
 				    const struct bpf_perf_event_opts *opts,
 	bool uprobe,
+	bool retprobe,
 	const char * debugfs_name)
 {
 	char errmsg[STRERR_BUFSIZE];
@@ -9474,8 +9517,9 @@ struct bpf_link *bpf_program__attach_perf_event_opts(
 	link->perf_event_fd = pfd;
 	link->link.uprobe = uprobe;
 	link->link.debugfs_name = NULL;
+	link->link.retprobe = retprobe;
 
-	// if [k,u]probe was created using debugfs method,
+	// if [k,u][ret]probe was created using debugfs method,
 	// store relevant attributes for detach logic
 	if (debugfs_name != NULL) {
 		link->link.debugfs_name = strdup(debugfs_name);
@@ -9535,9 +9579,9 @@ err_out:
 }
 
 struct bpf_link *bpf_program__attach_perf_event(struct bpf_program *prog, int pfd,
-			bool uprobe, const char * debugfs_name)
+			bool uprobe, bool retprobe, const char * debugfs_name)
 {
-	return bpf_program__attach_perf_event_opts(prog, pfd, NULL, uprobe, debugfs_name);
+	return bpf_program__attach_perf_event_opts(prog, pfd, NULL, uprobe, retprobe, debugfs_name);
 }
 
 static int determine_kprobe_perf_type(void)
@@ -9702,7 +9746,7 @@ bpf_program__attach_kprobe_opts(struct bpf_program *prog,
 
 	const char * name = exists(kprobe_event_source_type) ? NULL : func_name;
 
-	link = bpf_program__attach_perf_event_opts(prog, pfd, &pe_opts, false, name);
+	link = bpf_program__attach_perf_event_opts(prog, pfd, &pe_opts, false, retprobe, name);
 	err = libbpf_get_error(link);
 	if (err) {
 		close(pfd);
@@ -9783,8 +9827,8 @@ bpf_program__attach_uprobe_opts(struct bpf_program *prog, pid_t pid,
 	ref_ctr_off = OPTS_GET(opts, ref_ctr_offset, 0);
 	pe_opts.bpf_cookie = OPTS_GET(opts, bpf_cookie, 0);
 
-	pfd = perf_event_open_probe(true /* uprobe */, retprobe, func_name, binary_path,
-				    func_offset, pid, ref_ctr_off);
+	pfd = perf_event_open_probe(true /* uprobe */, retprobe, func_name,
+				    binary_path, func_offset, -1 /* pid */, ref_ctr_off);
 	if (pfd < 0) {
 		pr_warn("prog '%s': failed to create %s '%s:%s 0x%zx' perf event: %s\n",
 			prog->name, retprobe ? "uretprobe" : "uprobe", func_name,
@@ -9793,9 +9837,9 @@ bpf_program__attach_uprobe_opts(struct bpf_program *prog, pid_t pid,
 		return libbpf_err_ptr(pfd);
 	}
 
-	const char * name = exists(uprobe_event_source_type) ? NULL : binary_path;
+	const char * name = exists(uprobe_event_source_type) ? NULL : func_name;
 
-	link = bpf_program__attach_perf_event_opts(prog, pfd, &pe_opts, true, name);
+	link = bpf_program__attach_perf_event_opts(prog, pfd, &pe_opts, true, retprobe, name);
 	err = libbpf_get_error(link);
 	if (err) {
 		close(pfd);
@@ -9819,6 +9863,333 @@ struct bpf_link *bpf_program__attach_uprobe(struct bpf_program *prog,
 	return bpf_program__attach_uprobe_opts(prog, pid, func_name, binary_path, func_offset, &opts);
 }
 
+static uint64_t get_base_address_x64(const void * elf_addr)
+{
+	uint64_t base_address = 0;
+
+	Elf64_Ehdr * ehdr = (Elf64_Ehdr *)elf_addr;
+
+	if (ehdr->e_phnum == PN_XNUM) {
+		pr_warn("program header table too big, unsupported scenario\n");
+		return 0;
+	}
+
+	if (ehdr->e_phoff == 0) {
+		pr_warn("elf doesnt have any program header table\n");
+		return 0;
+	}
+
+	// iterate PT_LOAD program headers, store the mininal p_vaddr
+	for (int i = 0; i < ehdr->e_phnum; ++i) {
+		Elf64_Phdr * phdr = (Elf64_Phdr *)(elf_addr + ehdr->e_phoff + i * ehdr->e_phentsize);
+		if (phdr->p_type != PT_LOAD) {
+			continue;
+		}
+
+		if (base_address == 0 || base_address > phdr->p_vaddr) {
+			base_address = phdr->p_vaddr;
+		}
+	}
+
+	return base_address;
+}
+
+bool elf_is_executable(const void * elf_addr)
+{
+	Elf64_Ehdr * ehdr = (Elf64_Ehdr *)elf_addr;
+	return ehdr->e_type == ET_EXEC;
+}
+
+static bool get_symbol_by_name(
+	struct bpf_object *elf_obj,
+	const char *symbol_name,
+	const char *sec_name,
+	__u32 sec_type,
+	GElf_Sym *sym)
+{
+	Elf_Data *symbols_data;
+	Elf_Scn *symbols_scn;
+	GElf_Shdr symbols_shdr;
+
+	symbols_scn = elf_sec_by_name(elf_obj, sec_name);
+	if (symbols_scn == NULL) {
+		pr_warn("%s doesnt contain %s section\n", elf_obj->path, sec_name);
+		return false;
+	}
+
+	if (elf_sec_hdr(elf_obj, symbols_scn, &symbols_shdr)) {
+		return false;
+	}
+
+	if (symbols_shdr.sh_type != sec_type) {
+		pr_warn("invalid symbols section header type\n");
+		return false;
+	}
+
+	symbols_data = elf_sec_data(elf_obj, symbols_scn);
+	if (symbols_data == NULL) {
+		return false;
+	}
+
+	elf_obj->efile.symbols = symbols_data;
+	elf_obj->efile.strtabidx = symbols_shdr.sh_link;
+
+	return elf_sym_by_name(elf_obj, symbol_name, sym);
+}
+
+/*
+ * mmap 64bit ELF file
+ * 
+ * NOTE: 
+ *   user is resposible to munmap() returned address
+ */
+static bool mmap_elf_x64(const char * path, void ** elf_addr, size_t * elf_sz)
+{
+	char errmsg[STRERR_BUFSIZE];
+	struct stat sb;
+	int fd, err;
+	bool ret = false;
+
+	fd = open(path, O_RDONLY);
+	if (fd == -1) {
+		err = -errno;
+		pr_warn("%s open() failed: %s\n",
+		        path, libbpf_strerror_r(err, errmsg, sizeof(errmsg)));
+		return false;
+	}
+
+	if (fstat(fd, &sb) == -1) {
+		err = -errno;
+		pr_warn("%s fstat() failed: %s\n",
+		        path, libbpf_strerror_r(err, errmsg, sizeof(errmsg)));
+		goto done;
+	}
+
+	*elf_sz = sb.st_size;
+	*elf_addr = mmap(NULL, sb.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+	if (*elf_addr == MAP_FAILED) {
+		err = -errno;
+		pr_warn("%s mmap failed: %s\n",
+				path, libbpf_strerror_r(err, errmsg, sizeof(errmsg)));
+		goto done;
+	}
+
+	Elf64_Ehdr * ehdr = (Elf64_Ehdr *)(*elf_addr);
+	if (memcmp(ehdr, ELFMAG, 4)) {
+		err = -EINVAL;
+		pr_warn("%s has invalid elf format\n", path);
+		goto failed;
+	}
+
+	if (ehdr->e_ident[EI_CLASS] != ELFCLASS64) {
+		err = -EINVAL;
+		pr_warn("%s isnt 64bit elf file\n", path);
+		goto failed;
+	}
+
+	ret = true;
+	goto done;
+
+failed:
+	munmap(*elf_addr, sb.st_size);
+	*elf_addr = NULL;
+done:
+	close(fd);
+	return ret;
+}
+
+/*
+ * (hacky, but libbpf elf wrappers expecting bpf_object)
+ * allocates and initialize a dummy bpf_object, which wraps target elf file
+ * 
+ * NOTE: 
+ *   user resposible to call close_dummy_bpf_object() when done
+ */
+static struct bpf_object * make_dummy_bpf_object(
+	const char * elf_path,
+	void * elf_addr,
+	size_t elf_sz)
+{
+	int err;
+	struct bpf_object * obj;
+
+	// creating bpf_object natively,
+	// to populate only expected fields for libbpf elf utils
+	obj = calloc(1, sizeof(struct bpf_object) + strlen(elf_path) + 1);
+	if (!obj) {
+		pr_warn("calloc failed: %s\n", elf_path);
+		ERR_PTR(-ENOMEM);
+	}
+
+	strcpy(obj->path, elf_path);
+	strcpy(obj->name, "dummy");
+	
+	obj->efile.fd = -1;
+	obj->loaded = false;
+	obj->efile.obj_buf = elf_addr;
+	obj->efile.obj_buf_sz = elf_sz;
+
+	obj->efile.elf = elf_memory((char *)obj->efile.obj_buf,
+							    obj->efile.obj_buf_sz);
+	if (!obj->efile.elf) {
+		err = -LIBBPF_ERRNO__LIBELF;
+		pr_warn("elf_memory() failed to open %s: %s\n",
+		        obj->path, elf_errmsg(-1));
+		goto failed_1;
+	}
+
+	if (elf_getshdrstrndx(obj->efile.elf, &obj->efile.shstrndx)) {
+		err = -LIBBPF_ERRNO__FORMAT;
+		pr_warn("failed to get section names section index for %s: %s\n",
+				obj->path, elf_errmsg(-1));
+		goto failed_2;
+	}
+
+	/* Elf is corrupted/truncated, avoid calling elf_strptr. */
+	if (!elf_rawdata(elf_getscn(obj->efile.elf, obj->efile.shstrndx), NULL)) {
+		err = -LIBBPF_ERRNO__FORMAT;
+		pr_warn("failed to get section names strings from %s: %s\n",
+				obj->path, elf_errmsg(-1));
+		goto failed_2;
+	}
+	goto done;
+
+failed_2:
+	elf_end(obj->efile.elf);
+failed_1:
+	free(obj);
+	obj = ERR_PTR(err);
+done:
+	return obj;
+}
+
+void close_dummy_bpf_object(struct bpf_object * obj)
+{
+	if (obj == NULL || strcmp(obj->name, "dummy")) {
+		return;
+	}
+
+	if (obj->efile.elf) {
+		elf_end(obj->efile.elf);
+		obj->efile.elf = NULL;
+	}
+
+	void * addr = (void *)obj->efile.obj_buf;
+	size_t sz = obj->efile.obj_buf_sz;
+
+	free(obj);
+	munmap(addr, sz);
+}
+
+/*
+ * This function attaches u[ret]probe
+ * 
+ * Perf event details are parsed from eBPF program, SEC macro.
+ *
+ * Expected format:
+ *   SEC("u[ret]probe/:<binary_path>:<symbol>")
+ *
+ * For example:
+ *   SEC("uprobe/:/bin/zsh:zsh_main")
+ *
+ * 'binary_path': path to a 64bit ELF file
+ * 'symbol':      non empty dynamic symbol
+ *
+ * Symbol offset is calculated by ELF parsing given binary
+ */
+static struct bpf_link *attach_uprobe(
+	const struct bpf_sec_def *sec,
+	struct bpf_program *prog)
+{
+	char errmsg[STRERR_BUFSIZE];
+	int err;
+	char binary_realpath[PATH_MAX];
+	char *sec_name, *binary_path, *func_name;
+	bool retprobe;
+	void * elf_addr;
+	size_t elf_sz;
+	uint64_t base_addr, offset;
+	GElf_Sym sym;
+	struct bpf_object *obj;
+	struct bpf_link *link;
+
+	retprobe = strcmp(sec->sec, "uretprobe/") == 0;
+
+	sec_name = strdup(prog->sec_name);
+	if (!sec_name) {
+		err = -ENOMEM;
+		pr_warn("%s strdup failed\n", prog->sec_name);
+		return ERR_PTR(err);
+	}
+
+	binary_path = sec_name + sec->len + 1;
+	
+	func_name = strchr(binary_path, ':');
+	if (func_name == NULL) {
+		err = -EINVAL;
+		pr_warn("%s invalid binary path\n", binary_path);
+		goto failed_1;
+	}
+
+	*func_name = '\0';
+	func_name++;
+
+	pr_debug("attaching u%sprobe: binary_path: %s, func_name: %s\n",
+			 (retprobe ? "ret" : ""), binary_path, func_name);
+
+	if (realpath(binary_path, binary_realpath) == NULL) {
+		err = -errno;
+		pr_warn("%s realpath failed: %s\n",
+				binary_path, libbpf_strerror_r(err, errmsg, sizeof(errmsg)));
+		goto failed_1;		
+	}
+
+	if (!mmap_elf_x64(binary_realpath, &elf_addr, &elf_sz)) {
+		err = -1;
+		goto failed_1;
+	}
+
+	obj = make_dummy_bpf_object(binary_realpath, elf_addr, elf_sz);
+	if (IS_ERR_OR_NULL(obj)) {
+		err = PTR_ERR(obj);
+		goto failed_2;
+	}
+
+	base_addr = get_base_address_x64(obj->efile.obj_buf);
+	if (base_addr == 0) {
+		err = -1;
+		goto failed_2;
+	}	
+
+	if (!get_symbol_by_name(obj, func_name, ".dynsym", SHT_DYNSYM, &sym)) {
+		pr_warn("failed to find non empty symbol '%s' in '%s'\n",
+		        func_name, binary_realpath);
+		err = -1;
+		goto failed_2;
+	}
+
+	offset = sym.st_value;
+	if (elf_is_executable(obj->efile.obj_buf)) {
+		offset -= base_addr;
+	}
+
+	pr_debug("uprobe: binary: %s, symbol: %s, base addr: 0x%lx, sym addr: 0x%lx, offset: 0x%lx\n",
+	         binary_realpath, func_name, base_addr, sym.st_value, offset);
+
+	link = bpf_program__attach_uprobe(prog, retprobe, -1 /* pid */, func_name, binary_realpath, offset);
+	
+	close_dummy_bpf_object(obj);
+	goto done;
+
+failed_2:
+	munmap(elf_addr, elf_sz);
+failed_1:
+	link = ERR_PTR(err);
+done:
+	free(sec_name);
+	return link;	
+}
+
 static int perf_event_open_tracepoint(const char *tp_category,
 				      const char *tp_name)
 {
@@ -9826,7 +10197,7 @@ static int perf_event_open_tracepoint(const char *tp_category,
 	char errmsg[STRERR_BUFSIZE];
 	int tp_id, pfd, err;
 
-	tp_id = determine_tracepoint_id(tp_category, tp_name);
+	tp_id = determine_tracepoint_id(tp_category, tp_name, NULL);
 	if (tp_id < 0) {
 		pr_warn("failed to determine tracepoint '%s/%s' perf event ID: %s\n",
 			tp_category, tp_name,
@@ -9872,7 +10243,7 @@ struct bpf_link *bpf_program__attach_tracepoint_opts(struct bpf_program *prog,
 			libbpf_strerror_r(pfd, errmsg, sizeof(errmsg)));
 		return libbpf_err_ptr(pfd);
 	}
-	link = bpf_program__attach_perf_event_opts(prog, pfd, &pe_opts, false, NULL);
+	link = bpf_program__attach_perf_event_opts(prog, pfd, &pe_opts, false, false, NULL);
 	err = libbpf_get_error(link);
 	if (err) {
 		close(pfd);
