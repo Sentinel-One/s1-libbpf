@@ -1,7 +1,10 @@
 /* SPDX-License-Identifier: (LGPL-2.1 OR BSD-2-Clause) */
 
-#ifndef __LINUX_TYPES_H
+#if !defined(__LINUX_TYPES_H) && !defined(_LINUX_TYPES_H) || !defined(_UAPI__LINUX_TYPES_H)
+
 #define __LINUX_TYPES_H
+#define _LINUX_TYPES_H
+#define _UAPI__LINUX_TYPES_H
 
 #include <stdbool.h>
 #include <stddef.h>
