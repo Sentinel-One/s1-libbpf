@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 
-#if !defined(__LINUX_BPF_COMMON_H__) && !defined(_LINUX_BPF_COMMON_H__) || !defined(_UAPI__LINUX_BPF_COMMON_H__)
+#if !defined(__LINUX_BPF_COMMON_H__) && !defined(_LINUX_BPF_COMMON_H__) && !defined(_UAPI__LINUX_BPF_COMMON_H__)
 
 #define __LINUX_BPF_COMMON_H__
 #define _LINUX_BPF_COMMON_H__
