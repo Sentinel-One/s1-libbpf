@@ -1,7 +1,10 @@
 /* SPDX-License-Identifier: (LGPL-2.1 OR BSD-2-Clause) */
 
-#ifndef __LINUX_ERR_H
+#if !defined(__LINUX_ERR_H) && !defined(_LINUX_ERR_H) || !defined(_UAPI__LINUX_ERR_H)
+
 #define __LINUX_ERR_H
+#define _LINUX_ERR_H
+#define _UAPI__LINUX_ERR_H
 
 #include <linux/types.h>
 #include <asm/errno.h>
