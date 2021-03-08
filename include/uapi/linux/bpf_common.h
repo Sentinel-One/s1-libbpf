@@ -1,6 +1,10 @@
 /* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
-#ifndef __LINUX_BPF_COMMON_H__
+
+#if !defined(__LINUX_BPF_COMMON_H__) && !defined(_LINUX_BPF_COMMON_H__) || !defined(_UAPI__LINUX_BPF_COMMON_H__)
+
 #define __LINUX_BPF_COMMON_H__
+#define _LINUX_BPF_COMMON_H__
+#define _UAPI__LINUX_BPF_COMMON_H__
 
 /* Instruction classes */
 #define BPF_CLASS(code) ((code) & 0x07)
@@ -54,4 +58,4 @@
 #define BPF_MAXINSNS 4096
 #endif
 
-#endif /* __LINUX_BPF_COMMON_H__ */
+#endif

@@ -5,8 +5,11 @@
  * modify it under the terms of version 2 of the GNU General Public
  * License as published by the Free Software Foundation.
  */
-#ifndef __LINUX_BPF_H__
+#if !defined(__LINUX_BPF_H__) && !defined(_LINUX_BPF_H__) || !defined(_UAPI__LINUX_BPF_H__)
+
 #define __LINUX_BPF_H__
+#define _LINUX_BPF_H__
+#define _UAPI__LINUX_BPF_H__
 
 #include <linux/types.h>
 #include <linux/bpf_common.h>
@@ -7615,4 +7618,4 @@ enum bpf_kfunc_flags {
 	BPF_F_PAD_ZEROS = (1ULL << 0),
 };
 
-#endif /* __LINUX_BPF_H__ */
+#endif
