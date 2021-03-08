@@ -5,7 +5,10 @@
  * modify it under the terms of version 2 of the GNU General Public
  * License as published by the Free Software Foundation.
  */
-#ifndef _UAPI__LINUX_BPF_H__
+#if !defined(__LINUX_BPF_H__) && !defined(_LINUX_BPF_H__) || !defined(_UAPI__LINUX_BPF_H__)
+
+#define __LINUX_BPF_H__
+#define _LINUX_BPF_H__
 #define _UAPI__LINUX_BPF_H__
 
 #include <linux/types.h>
@@ -7155,4 +7158,4 @@ struct bpf_iter_num {
 	__u64 __opaque[1];
 } __attribute__((aligned(8)));
 
-#endif /* _UAPI__LINUX_BPF_H__ */
+#endif
