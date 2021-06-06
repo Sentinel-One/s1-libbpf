@@ -64,7 +64,9 @@
 // was fmemopen@GLIBC_2.2.22,
 // enforce symbol version as linux agent works with GLIBC_2.19
 // refer to fmemopen(3)
+#if !defined(aarch64)
 __asm__(".symver fmemopen,fmemopen@GLIBC_2.2.5");
+#endif
 
 // Customization:
 enum bpf_prog_type customized_probe_prog_type = BPF_PROG_TYPE_UNSPEC;
