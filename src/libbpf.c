@@ -410,6 +410,7 @@ enum extern_type {
 	EXT_UNKNOWN,
 	EXT_KCFG,
 	EXT_KSYM,
+	EXT_S1,
 };
 
 enum kcfg_type {
@@ -447,6 +448,9 @@ struct extern_desc {
 			/* local btf_id of the ksym extern's type. */
 			__u32 type_id;
 		} ksym;
+		struct {
+			__u64 default_value;
+		} s1;
 	};
 };
 
@@ -475,6 +479,8 @@ struct bpf_object {
 	int nr_extern;
 	int kconfig_map_idx;
 	int rodata_map_idx;
+
+	struct hashmap *consts;
 
 	bool loaded;
 	bool has_subcalls;
@@ -3518,6 +3524,16 @@ static int bpf_object__collect_externs(struct bpf_object *obj)
 		memset(ext, 0, sizeof(*ext));
 		obj->nr_extern++;
 
+		if (strncmp(ext_name, "s1_", sizeof("s1_")-1) == 0) {
+			ext->type = EXT_S1;
+			ext->name = strdup(ext_name);
+			ext->s1.default_value = 0;
+			ext->sym_idx = i;
+			ext->is_set = true;
+			ext->is_weak = false;
+			continue;
+		}
+
 		ext->btf_id = find_extern_btf_id(obj->btf, ext_name);
 		if (ext->btf_id <= 0) {
 			pr_warn("failed to find BTF for extern '%s': %d\n",
@@ -3793,7 +3809,7 @@ static int bpf_program__record_reloc(struct bpf_program *prog,
 			if (ext->sym_idx == sym_idx)
 				break;
 		}
-		if (i >= n) {
+		if (i >= n && ext->type != EXT_S1) {
 			pr_warn("prog '%s': extern relo failed to find extern for '%s' (%d)\n",
 				prog->name, sym_name, sym_idx);
 			return -LIBBPF_ERRNO__RELOC;
@@ -5489,6 +5505,21 @@ bpf_object__relocate_data(struct bpf_object *obj, struct bpf_program *prog)
 					insn[0].imm = obj->maps[obj->kconfig_map_idx].fd;
 				}
 				insn[1].imm = ext->kcfg.data_off;
+			} else if (ext->type == EXT_S1) {
+				if (!obj->consts) {
+					pr_warn("prog '%s': no const externs\n", prog->name);
+					return -EINVAL;
+				}
+				void *result = NULL;
+				if (!hashmap__find(obj->consts, ext->name, &result)) {
+					pr_warn("prog '%s': couldn't resolve const extern '%s'\n",
+							prog->name, ext->name);
+					return -EINVAL;
+				}
+				__u32 val = (__u32)(long)result;
+				pr_debug("relocate_data: prog '%s': extern='%s', val=0x%X\n",
+						 prog->name, ext->name, val);
+				insn[0].imm = val;
 			} else /* EXT_KSYM */ {
 				if (ext->ksym.type_id && ext->is_set) { /* typed ksyms */
 					insn[0].src_reg = BPF_PSEUDO_BTF_ID;
@@ -6544,6 +6575,16 @@ bpf_object__load_progs(struct bpf_object *obj, int log_level)
 
 static const struct bpf_sec_def *find_sec_def(const char *sec_name);
 
+static size_t str_hash_fn(const void *key, void *ctx)
+{
+	return str_hash(key);
+}
+
+static bool str_equal_fn(const void *a, const void *b, void *ctx)
+{
+	return strcmp(a, b) == 0;
+}
+
 static struct bpf_object *
 __bpf_object__open(const char *path, const void *obj_buf, size_t obj_buf_sz,
 		   const struct bpf_object_open_opts *opts)
@@ -6599,6 +6640,33 @@ __bpf_object__open(const char *path, const void *obj_buf, size_t obj_buf_sz,
 			err = -ENOMEM;
 			goto out;
 		}
+	}
+
+	struct consts_rewrite *consts_rewrite = OPTS_GET(opts, consts_rewrite, NULL);
+	if (consts_rewrite) {
+		 obj->consts = hashmap__new(str_hash_fn, str_equal_fn, NULL);
+		 if (IS_ERR(obj->consts)) {
+			 pr_warn("error in initializing const rewrite hashmap\n");
+			 err = PTR_ERR(obj->consts);
+			 obj->consts = NULL;
+			 goto out;
+		 }
+
+		 for (int i = 0; i < consts_rewrite->num_entries; ++i) {
+			 struct const_rewrite_entry *entry = &consts_rewrite->entries[i];
+			 err = hashmap__append(obj->consts, (void *)entry->symbol, (void *)(long)entry->value);
+			 if (err) {
+				 pr_warn("error in loading user provided const rewrites\n");
+				 goto out;
+			 }
+		 }
+		 if (!hashmap__find(obj->consts, "s1_kernel_version", NULL)) {
+			 err = hashmap__append(obj->consts, "s1_kernel_version", (void *)(long)obj->kern_version);
+			 if (err) {
+				 pr_warn("error in loading s1_kernel_version const\n");
+				 goto out;
+			 }
+		 }
 	}
 
 	err = bpf_object__elf_init(obj);
@@ -6992,6 +7060,7 @@ static int bpf_object__resolve_externs(struct bpf_object *obj,
 				need_vmlinux_btf = true;
 			else
 				need_kallsyms = true;
+		} else if (ext->type == EXT_S1) {
 		} else {
 			pr_warn("unrecognized extern '%s'\n", ext->name);
 			return -EINVAL;

@@ -66,6 +66,18 @@ struct bpf_object_open_attr {
 	enum bpf_prog_type prog_type;
 };
 
+struct const_rewrite_entry
+{
+	const char *symbol;
+	__u32 value;
+};
+
+struct consts_rewrite
+{
+	size_t num_entries;
+	struct const_rewrite_entry *entries;
+};
+
 struct bpf_object_open_opts {
 	/* size of this struct, for forward/backward compatiblity */
 	size_t sz;
@@ -101,8 +113,10 @@ struct bpf_object_open_opts {
 	 * struct_ops, etc) will need actual kernel BTF at /sys/kernel/btf/vmlinux.
 	 */
 	const char *btf_custom_path;
+	/* Symbol list to resolve in load time. */
+	struct consts_rewrite *consts_rewrite;
 };
-#define bpf_object_open_opts__last_field btf_custom_path
+#define bpf_object_open_opts__last_field consts_rewrite
 
 LIBBPF_API struct bpf_object *bpf_object__open(const char *path);
 LIBBPF_API struct bpf_object *
