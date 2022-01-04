@@ -482,6 +482,8 @@ struct bpf_object {
 
 	struct hashmap *consts;
 
+	bool rodata_init_best_effort;
+
 	bool loaded;
 	bool has_subcalls;
 
@@ -4891,6 +4893,11 @@ bpf_object__create_maps(struct bpf_object *obj)
 	for (i = 0; i < obj->nr_maps; i++) {
 		map = &obj->maps[i];
 
+		if (map->libbpf_type == LIBBPF_MAP_RODATA && obj->rodata_init_best_effort) {
+			pr_warn("Ignoring rodata map '%s'\n", map->name);
+			continue;
+		}
+
 		retried = false;
 retry:
 		if (map->pin_path) {
@@ -6801,8 +6808,9 @@ static int bpf_object__sanitize_maps(struct bpf_object *obj)
 		if (!bpf_map__is_internal(m))
 			continue;
 		if (!kernel_supports(obj, FEAT_GLOBAL_DATA)) {
-			pr_warn("kernel doesn't support global data\n");
-			return -ENOTSUP;
+			obj->rodata_init_best_effort = true;
+			pr_warn("kernel doesn't support global data - ignoring rodata map!\n");
+			continue;
 		}
 		if (!kernel_supports(obj, FEAT_ARRAY_MMAP))
 			m->def.map_flags ^= BPF_F_MMAPABLE;
