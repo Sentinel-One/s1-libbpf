@@ -8450,6 +8450,18 @@ const char *bpf_program__section_name(const struct bpf_program *prog)
 	return prog->sec_name;
 }
 
+void bpf_program__set_section_name(struct bpf_program *prog, const char * new_sec_name)
+{
+    if (!prog || !new_sec_name) {
+        pr_warn("bpf_program__set_section_name: 'prog' and/or 'new_sec_name' are NULL\n");
+        return;
+    }
+
+    zfree(&prog->sec_name);
+    prog->sec_name = strdup(new_sec_name);
+    pr_info("bpf_program__set_section_name: updated prog->sec_name: %s\n", prog->sec_name);
+}
+
 const char *bpf_program__title(const struct bpf_program *prog, bool needs_copy)
 {
 	const char *title;
@@ -9539,6 +9551,33 @@ struct bpf_link {
 	char *debugfs_name; /* NULL, unless [k,u]probe was defined using debugfs */
 };
 
+
+// Customization
+// Check if symbol contains 'isra' suffix
+static bool isra_symbol(const char * symbol)
+{
+	return strstr(symbol, ".isra") != NULL;
+}
+
+// Customization
+// kprobe definition (from kernel kprobes doc):
+//     'p[:[GRP/]EVENT] [MOD:]SYM[+offs]|MEMADDR [FETCHARGS]'
+//
+// There are distros (like, CentOS 8.3) which fail to hook if the EVENT contains '.',
+// which is a common scenario with 'isra' suffix symbols, so replace '.' with '_'.
+//
+// NOTE: user responsible to deallocate returned C string
+static char * make_isra_symbol_comp(const char * symbol)
+{
+	char *name, *p;
+
+	name = p = strdup(symbol);
+	while ((p = strchr(p, '.')))
+		*p = '_';
+
+	return name;
+}
+
 // Customization:
 static bool exists(const char * file)
 {
@@ -9586,10 +9625,12 @@ static int debugfs_clear_probe(
 	int err, written;	
 	char probe[1024];
 
+	char * isra_name_comp = isra_symbol(name) ? make_isra_symbol_comp(name) : NULL;
+
 	written = snprintf(probe, sizeof(probe),
 		"-:%s/%s%s",
 		ebpf_group_prefix,
-		name,
+		(isra_name_comp ? isra_name_comp : name),
 		(retprobe ? "_exit" : "_enter"));
 
 	if (written < 0 && log_failure) {
@@ -9598,6 +9639,7 @@ static int debugfs_clear_probe(
 		        (uprobe ? 'u' : 'k'),
 				(retprobe ? "ret" : ""),
 		        libbpf_strerror_r(err, buf, sizeof(buf)));
+		zfree(&isra_name_comp);
 		return err;
 	}
 
@@ -9606,6 +9648,8 @@ static int debugfs_clear_probe(
 			 probe);
 
 	const char * probe_events = uprobe ? uprobe_events : kprobe_events;
+
+	zfree(&isra_name_comp);
 
 	return append_to(probe_events, probe, written, log_failure);
 }
@@ -9625,11 +9669,13 @@ static int debugfs_set_kprobe(
 	int err, written;
 	char kprobe[1024];
 
+	char * isra_name_comp = isra_symbol(name) ? make_isra_symbol_comp(name) : NULL;
+
 	written = snprintf(kprobe, sizeof(kprobe),
 		"%c:%s/%s%s %s",
 		(retprobe ? 'r' : 'p'),
 		ebpf_group_prefix,
-		name,
+		(isra_name_comp ? isra_name_comp : name),
 		(retprobe ? "_exit" : "_enter"),
 		name);
 
@@ -9639,12 +9685,15 @@ static int debugfs_set_kprobe(
 		        (retprobe ? "kretprobe" : "kprobe"),
 		        name,
 		        libbpf_strerror_r(err, buf, sizeof(buf)));
+		zfree(&isra_name_comp);
 		return err;
 	}
 
 	pr_debug("setting %s: %s\n",
 	         (retprobe ? "kretprobe" : "kprobe"),
 	         kprobe);
+
+	zfree(&isra_name_comp);
 
 	return append_to(kprobe_events, kprobe, written, true);
 }
@@ -9741,23 +9790,32 @@ static int parse_uint_from_file(const char *file, const char *fmt)
 	return ret;
 }
 
-static int determine_tracepoint_id(const char *tp_category,
-				   const char *tp_name,
-				   const char *suffix)
+static int determine_tracepoint_id(
+	const char *tp_category,
+	const char *tp_name,
+	const char *suffix)
 {
 	char file[PATH_MAX];
 	int ret;
 
+	char * isra_name_comp = isra_symbol(tp_name) ? make_isra_symbol_comp(tp_name) : NULL;
+
 	ret = snprintf(file, sizeof(file),
 		       "/sys/kernel/debug/tracing/events/%s/%s%s/id",
-		       tp_category, tp_name, (suffix == NULL ? "" : suffix));
-	if (ret < 0)
+		       tp_category, (isra_name_comp ? isra_name_comp : tp_name), (suffix == NULL ? "" : suffix));
+	if (ret < 0) {
+		zfree(&isra_name_comp);
 		return -errno;
+	}
 	if (ret >= sizeof(file)) {
 		pr_debug("tracepoint %s/%s path is too long\n",
-			 tp_category, tp_name);
+			 tp_category, (isra_name_comp ? isra_name_comp : tp_name));
+		zfree(&isra_name_comp);
 		return -E2BIG;
 	}
+
+	zfree(&isra_name_comp);
+
 	return parse_uint_from_file(file, "%d\n");
 }
 
@@ -10004,7 +10062,8 @@ struct bpf_link *bpf_program__attach_perf_event(
 	// if [k,u][ret]probe was created using debugfs method,
 	// store relevant attributes for detach logic
 	if (debugfs_name != NULL) {
-		link->debugfs_name = strdup(debugfs_name);
+		link->debugfs_name =
+			isra_symbol(debugfs_name) ? make_isra_symbol_comp(debugfs_name) : strdup(debugfs_name);
 		if (link->debugfs_name == NULL) {
 			err = -errno;
 			free(link);
@@ -10143,6 +10202,12 @@ static int perf_event_open_probe(bool uprobe, bool retprobe, const char *name,
 
 	int pfd = -1;
 
+	if (isra_symbol(name)) {
+		// In dynamic PMU it's not possible to set the event name,
+		// to ensure symbol doesnt contain '.' (refer to make_isra_symbol_comp() doc)
+		dynamic_pmu_kprobe = false;
+	}
+
 	if (dynamic_pmu_kprobe) {
 		pfd = dynamic_pmu_perf_event_open_probe(uprobe, retprobe, name, offset, pid);
 	} else if (dynamic_pmu_uprobe) {
@@ -10177,7 +10242,7 @@ struct bpf_link *bpf_program__attach_kprobe(
 		return ERR_PTR(pfd);
 	}
 
-	const char * name = exists(kprobe_event_source_type) ? NULL : func_name;
+	const char * name = (isra_symbol(func_name) || !exists(kprobe_event_source_type)) ? func_name : NULL;
 
 	link = bpf_program__attach_perf_event(prog, pfd, false, retprobe, name);
 	if (IS_ERR(link)) {

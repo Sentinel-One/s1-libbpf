@@ -812,6 +812,14 @@ LIBBPF_API bool libbpf_set_once_enable_probe_with_kernel_version();
  */
 LIBBPF_API __u32 libbpf_get_kprobe_kernel_version(enum bpf_prog_type type);
 
+// Customization:
+/*
+ * Sets bpf_program 'sec_name' attribute.
+ * Enables in runtime to configure which symbol to hook on the eBPF program
+ * For example: support symbols with 'isra' suffix
+ */
+LIBBPF_API void bpf_program__set_section_name(struct bpf_program *prog, const char * new_sec_name);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

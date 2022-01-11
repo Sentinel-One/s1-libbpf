@@ -125,6 +125,7 @@ LIBBPF_0.0.1 {
 		libbpf_get_probe_prog_type;
 		libbpf_set_once_enable_probe_with_kernel_version;
 		libbpf_get_kprobe_kernel_version;
+		bpf_program__set_section_name;
 	local:
 		*;
 };
