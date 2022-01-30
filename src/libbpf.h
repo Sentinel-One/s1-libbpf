@@ -986,6 +986,11 @@ LIBBPF_API __u32 libbpf_get_kprobe_kernel_version(enum bpf_prog_type type);
  */
 LIBBPF_API void bpf_program__set_section_name(struct bpf_program *prog, const char * new_sec_name);
 
+// Customization:
+LIBBPF_API const char * libbpf_get_debugfs_location(void);
+LIBBPF_API bool libbpf_set_debugfs_location(const char * path);
+LIBBPF_API const char * libbpf_with_debugfs_location_prefix(const char * file);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif
