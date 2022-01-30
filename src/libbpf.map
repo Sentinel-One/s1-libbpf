@@ -126,6 +126,9 @@ LIBBPF_0.0.1 {
 		libbpf_set_once_enable_probe_with_kernel_version;
 		libbpf_get_kprobe_kernel_version;
 		bpf_program__set_section_name;
+		libbpf_get_debugfs_location;
+		libbpf_set_debugfs_location;
+		libbpf_with_debugfs_location_prefix;
 	local:
 		*;
 };

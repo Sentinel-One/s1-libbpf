@@ -76,10 +76,15 @@ enum bpf_prog_type customized_probe_prog_type = BPF_PROG_TYPE_UNSPEC;
 bool probe_with_kernel_version_enabled = false;
 
 // Customization:
+const char * debugfs_default_path = "/sys/kernel/debug/tracing";
+bool use_default_debugfs_location = true;
+char debugfs_customized_location[256] = {0};
+
+// Customization:
 // so [k,u]probe location will be: /sys/kernel/debug/tracing/events/s1_ebpf/<probe name>
 const char * ebpf_group_prefix = "s1_ebpf";
-const char * kprobe_events = "/sys/kernel/debug/tracing/kprobe_events";
-const char * uprobe_events = "/sys/kernel/debug/tracing/uprobe_events";
+const char * kprobe_events = "kprobe_events";
+const char * uprobe_events = "uprobe_events";
 const char * kprobe_event_source_type = "/sys/bus/event_source/devices/kprobe/type";
 const char * uprobe_event_source_type = "/sys/bus/event_source/devices/uprobe/type";
 
@@ -9160,7 +9165,35 @@ static char * make_isra_symbol_comp(const char * symbol)
 // Customization:
 static bool exists(const char * file)
 {
+	if (file == NULL) {
+		return false;
+	}
+
 	return access(file, F_OK) == 0;
+}
+
+// Customization:
+const char * libbpf_with_debugfs_location_prefix(const char * file)
+{
+	char buf[STRERR_BUFSIZE];
+	int err, ret;
+	static char path[sizeof(debugfs_customized_location) + 64] = {0};
+
+	if (file == NULL) {
+		return NULL;
+	}
+
+	ret = snprintf(path, sizeof(path),
+				   "%s/%s",
+				   libbpf_get_debugfs_location(), file);
+	if (ret < 0) {
+		err = -errno;
+		pr_warn("libbpf_with_debugfs_location_prefix: failed: %s\n",
+				libbpf_strerror_r(err, buf, sizeof(buf)));
+		return NULL;
+	}
+
+	return path;
 }
 
 // Customization:
@@ -9170,10 +9203,14 @@ static int append_to(const char *file, const char *data, size_t sz, bool log_fai
 	int fd, err, ret;
 	ssize_t written;
 
+	if (file == NULL) {
+		return -1;
+	}
+
 	fd = open(file, O_WRONLY | O_APPEND | O_CLOEXEC);
 	if (fd < 0 && log_failure) {
 		err = -errno;
-		pr_warn("failed to open '%s': %s\n",
+		pr_warn("append_to: failed to open '%s': %s\n",
 		        file,
 		        libbpf_strerror_r(err, buf, sizeof(buf)));
 		return err;
@@ -9183,7 +9220,7 @@ static int append_to(const char *file, const char *data, size_t sz, bool log_fai
 	ret = written == sz ? 0 : -1;
 
 	if (ret < 0 && log_failure) {
-		pr_warn("failed to append '%s' to '%s'\n", data, file);
+		pr_warn("append_to: failed to append '%s' to '%s'\n", data, file);
 	}
 
 	close(fd);
@@ -9230,7 +9267,7 @@ static int debugfs_clear_probe(
 
 	zfree(&isra_name_comp);
 
-	return append_to(probe_events, probe, written, log_failure);
+	return append_to(libbpf_with_debugfs_location_prefix(probe_events), probe, written, log_failure);
 }
 
 // Customization:
@@ -9274,7 +9311,7 @@ static int debugfs_set_kprobe(
 
 	zfree(&isra_name_comp);
 
-	return append_to(kprobe_events, kprobe, written, true);
+	return append_to(libbpf_with_debugfs_location_prefix(kprobe_events), kprobe, written, true);
 }
 
 // Customization:
@@ -9318,7 +9355,7 @@ static int debugfs_set_uprobe(
 	         (retprobe ? "uretprobe" : "uprobe"),
 	         uprobe);
 
-	return append_to(uprobe_events, uprobe, written, true);
+	return append_to(libbpf_with_debugfs_location_prefix(uprobe_events), uprobe, written, true);
 }
 
 // Customization:
@@ -9380,8 +9417,11 @@ static int determine_tracepoint_id(
 	char * isra_name_comp = isra_symbol(tp_name) ? make_isra_symbol_comp(tp_name) : NULL;
 
 	ret = snprintf(file, sizeof(file),
-		       "/sys/kernel/debug/tracing/events/%s/%s%s/id",
-		       tp_category, (isra_name_comp ? isra_name_comp : tp_name), (suffix == NULL ? "" : suffix));
+				   "%s/events/%s/%s%s/id",
+				   libbpf_get_debugfs_location(),
+				   tp_category,
+				   (isra_name_comp ? isra_name_comp : tp_name),
+				   (suffix == NULL ? "" : suffix));
 	if (ret < 0) {
 		zfree(&isra_name_comp);
 		return -errno;
@@ -9838,8 +9878,8 @@ static int perf_event_open_probe(bool uprobe, bool retprobe, const char *name,
 {
 	bool dynamic_pmu_kprobe = !uprobe && exists(kprobe_event_source_type);
 	bool dynamic_pmu_uprobe = uprobe && exists(uprobe_event_source_type);
-	bool debugfs_kprobe = !uprobe && exists(kprobe_events);
-	bool debugfs_uprobe = uprobe && exists(uprobe_events);
+	bool debugfs_kprobe = !uprobe && exists(libbpf_with_debugfs_location_prefix(kprobe_events));
+	bool debugfs_uprobe = uprobe && exists(libbpf_with_debugfs_location_prefix(uprobe_events));
 
 	int pfd = -1;
 
@@ -11827,4 +11867,32 @@ __u32 libbpf_get_kprobe_kernel_version(enum bpf_prog_type type)
     }
 
 	return kversion;
+}
+
+const char * libbpf_get_debugfs_location(void)
+{
+	return use_default_debugfs_location ? debugfs_default_path :
+	                                      debugfs_customized_location;
+}
+
+bool libbpf_set_debugfs_location(const char * path)
+{
+	size_t n = strlen(path);
+
+	if (path == NULL || n == 0) {
+		pr_warn("set_debugfs_location: failed, null/empty path, using %s\n",
+				libbpf_get_debugfs_location());
+		return false;
+	} else if (sizeof(debugfs_customized_location) <= n) {
+		pr_warn("set_debugfs_location: failed, path too long, using %s\n",
+				libbpf_get_debugfs_location());
+		return false;
+	}
+
+	strcpy(debugfs_customized_location, path);
+	use_default_debugfs_location = false;
+
+	pr_info("debugfs location: %s\n", libbpf_get_debugfs_location());
+
+	return true;
 }
