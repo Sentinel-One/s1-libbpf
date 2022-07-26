@@ -9196,6 +9196,7 @@ const char * libbpf_with_debugfs_location_prefix(const char * file)
 	return path;
 }
 
+
 // Customization:
 static int append_to(const char *file, const char *data, size_t sz, bool log_failure)
 {
