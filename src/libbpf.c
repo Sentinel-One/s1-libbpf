@@ -9197,6 +9197,33 @@ const char * libbpf_with_debugfs_location_prefix(const char * file)
 }
 
 // Customization:
+static bool debugfs_probe_exists(const char * name, bool retprobe)
+{
+	char buf[STRERR_BUFSIZE];
+	int err, ret;
+	static char path[sizeof(debugfs_customized_location) + 128] = {0};
+
+	if (name == NULL) {
+		return false;
+	}
+
+	ret = snprintf(path, sizeof(path),
+	               "%s/events/%s/%s%s",
+	               libbpf_get_debugfs_location(),
+	               ebpf_group_prefix,
+	               name,
+	               retprobe ? "_exit" : "_enter");
+	if (ret < 0) {
+		err = -errno;
+		pr_warn("debugfs_probe_exists: failed: %s\n",
+		        libbpf_strerror_r(err, buf, sizeof(buf)));
+		return false;
+	}
+
+	return exists(path);
+}
+
+// Customization:
 static int append_to(const char *file, const char *data, size_t sz, bool log_failure)
 {
 	char buf[STRERR_BUFSIZE];
@@ -9242,6 +9269,11 @@ static int debugfs_clear_probe(
 	char probe[1024];
 
 	char * isra_name_comp = isra_symbol(name) ? make_isra_symbol_comp(name) : NULL;
+
+	if (!debugfs_probe_exists(isra_name_comp ? isra_name_comp : name, retprobe)) {
+		zfree(&isra_name_comp);
+		return 0;
+	}
 
 	written = snprintf(probe, sizeof(probe),
 		"-:%s/%s%s",
