@@ -9243,11 +9243,16 @@ static int append_to(const char *file, const char *data, size_t sz, bool log_fai
 		return err;
 	}
 
+	errno = 0;
 	written = write(fd, data, sz);
 	ret = written == sz ? 0 : -1;
 
 	if (ret < 0 && log_failure) {
-		pr_warn("append_to: failed to append '%s' to '%s'\n", data, file);
+		err = -errno;
+		pr_warn("append_to: failed to append '%s' to '%s': %s\n",
+		        data,
+		        file,
+		        libbpf_strerror_r(err, buf, sizeof(buf)));
 	}
 
 	close(fd);
