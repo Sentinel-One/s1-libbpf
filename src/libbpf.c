@@ -47,7 +47,9 @@
 #include <libelf.h>
 #include <gelf.h>
 #include <zlib.h>
+#if 0
 #include <sys/auxv.h>
+#endif
 
 #include "libbpf.h"
 #include "bpf.h"
@@ -829,6 +831,7 @@ done:
 	return kversion;
 }
 
+#if 0
 // Customization:
 // Another approach, get kernel version from vdso 'note' section
 // Should be more robust detecting actual RUNNING kernel version
@@ -884,6 +887,7 @@ static __u32 get_kernel_version_vdso_x64()
 done:
     return kversion;
 }
+#endif
 
 // Customization:
 // Change get kernel version code runtime logic, to increase portability
@@ -891,16 +895,20 @@ static __u32 get_kernel_version(void)
 {
 	__u32 kversion = 0;
 
+#if 0
 	kversion = get_kernel_version_vdso_x64();
 	if (kversion != 0) {
 		goto done;
 	}
+#endif
 
 	int is_ubuntu = access("/proc/version_signature", R_OK) == 0;
 
 	kversion = is_ubuntu ? get_ubuntu_kernel_version() :
 	                       get_kernel_version_uname();
+#if 0
 done:
+#endif
     return kversion;
 }
 

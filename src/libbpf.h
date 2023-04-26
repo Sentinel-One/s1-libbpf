@@ -20,6 +20,14 @@
 #include "libbpf_common.h"
 #include "libbpf_legacy.h"
 
+#ifndef PERF_EVENT_IOC_SET_BPF
+#define PERF_EVENT_IOC_SET_BPF _IOW('$', 8, __u32)
+#endif
+
+#ifndef PERF_COUNT_SW_BPF_OUTPUT
+#define PERF_COUNT_SW_BPF_OUTPUT 10
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
