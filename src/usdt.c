@@ -21,6 +21,11 @@
 #include "libbpf_internal.h"
 #include "hashmap.h"
 
+// Customization:
+// workaround just to pass compilation
+typedef Elf64_Nhdr GElf_Nhdr; // as defined in 'elfutils/libelf/gelf.h'
+                              // and 'tools/perf/util/symbol-elf.c'
+
 /* libbpf's USDT support consists of BPF-side state/code and user-space
  * state/code working together in concert. BPF-side parts are defined in
  * usdt.bpf.h header library. User-space state is encapsulated by struct
@@ -587,6 +592,12 @@ static int collect_usdt_targets(struct usdt_manager *man, Elf *elf, const char *
 	*out_targets = NULL;
 	*out_target_cnt = 0;
 
+	// Customization
+	// for now, don't support USDT
+	err = -EINVAL;
+	pr_warn("usdt: no USDT support\n");
+	return err;
+
 	err = find_elf_sec_by_name(elf, USDT_NOTE_SEC, &notes_shdr, &notes_scn);
 	if (err) {
 		pr_warn("usdt: no USDT notes section (%s) found in '%s'\n", USDT_NOTE_SEC, path);
@@ -612,7 +623,7 @@ static int collect_usdt_targets(struct usdt_manager *man, Elf *elf, const char *
 
 	data = elf_getdata(notes_scn, 0);
 	off = 0;
-	while ((off = gelf_getnote(data, off, &nhdr, &name_off, &desc_off)) > 0) {
+	while ((off /*= gelf_getnote(data, off, &nhdr, &name_off, &desc_off)*/) > 0) {
 		long usdt_abs_ip, usdt_rel_ip, usdt_sema_off = 0;
 		struct usdt_note note;
 		struct elf_seg *seg = NULL;
