@@ -219,6 +219,9 @@ static const char * const prog_type_name[] = {
 	[BPF_PROG_TYPE_NETFILTER]		= "netfilter",
 };
 
+// Customization:
+enum bpf_prog_type libbpf_probe_customized_prog_type = BPF_PROG_TYPE_UNSPEC;
+
 static int __base_pr(enum libbpf_print_level level, const char *format,
 		     va_list args)
 {
@@ -4644,7 +4647,7 @@ static int probe_kern_prog_name(void)
 	int ret;
 
 	memset(&attr, 0, attr_sz);
-	attr.prog_type = BPF_PROG_TYPE_SOCKET_FILTER;
+	attr.prog_type = libbpf_probe_get_prog_type(BPF_PROG_TYPE_SOCKET_FILTER);
 	attr.license = ptr_to_u64("GPL");
 	attr.insns = ptr_to_u64(insns);
 	attr.insn_cnt = (__u32)ARRAY_SIZE(insns);
@@ -4677,7 +4680,12 @@ static int probe_kern_global_data(void)
 
 	insns[0].imm = map;
 
-	ret = bpf_prog_load(BPF_PROG_TYPE_SOCKET_FILTER, NULL, "GPL", insns, insn_cnt, NULL);
+	ret = bpf_prog_load(libbpf_probe_get_prog_type(BPF_PROG_TYPE_SOCKET_FILTER),
+						NULL,
+						"GPL",
+						insns,
+						insn_cnt,
+						NULL);
 	close(map);
 	return probe_fd(ret);
 }
@@ -4855,7 +4863,12 @@ static int probe_prog_bind_map(void)
 		return ret;
 	}
 
-	prog = bpf_prog_load(BPF_PROG_TYPE_SOCKET_FILTER, NULL, "GPL", insns, insn_cnt, NULL);
+	prog = bpf_prog_load(libbpf_probe_get_prog_type(BPF_PROG_TYPE_SOCKET_FILTER),
+						 NULL,
+						 "GPL",
+						 insns,
+						 insn_cnt,
+						 NULL);
 	if (prog < 0) {
 		close(map);
 		return 0;
@@ -13395,4 +13408,40 @@ void bpf_object__destroy_skeleton(struct bpf_object_skeleton *s)
 	free(s->maps);
 	free(s->progs);
 	free(s);
+}
+
+// Customization:
+bool libbpf_probe_set_prog_type(enum bpf_prog_type type)
+{
+	enum bpf_prog_type previous_type =
+		__sync_val_compare_and_swap(&libbpf_probe_customized_prog_type,
+									BPF_PROG_TYPE_UNSPEC,
+									type);
+
+	if (previous_type == BPF_PROG_TYPE_UNSPEC) {
+		return true;
+	}
+
+	// if reach here, means libbpf_probe_set_prog_type()
+	// was called before, so let's retry with 'previous_type'
+	bool result = __sync_bool_compare_and_swap(&libbpf_probe_customized_prog_type,
+											   previous_type,
+											   type);
+
+	if (!result) {
+		// trying to set 'libbpf_probe_customized_prog_type' only twice,
+		// because libbpf_probe_set_prog_type() should be called in initialization phase
+		pr_warn("libbpf_probe_set_prog_type: failed, race?\n");
+	}
+
+	return result;
+}
+
+// Customization:
+enum bpf_prog_type libbpf_probe_get_prog_type(enum bpf_prog_type default_type)
+{
+    return __sync_bool_compare_and_swap(&libbpf_probe_customized_prog_type,
+                                        BPF_PROG_TYPE_UNSPEC,
+                                        BPF_PROG_TYPE_UNSPEC) ? default_type :
+                                                                libbpf_probe_customized_prog_type;
 }
