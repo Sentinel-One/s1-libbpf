@@ -13,10 +13,17 @@
 #include <linux/filter.h>
 #include <linux/kernel.h>
 #include <linux/version.h>
+#include <sys/auxv.h>
 
 #include "bpf.h"
 #include "libbpf.h"
 #include "libbpf_internal.h"
+
+
+// Customization:
+#define ALIGN_UP(x,a)         ALIGN_MASK(x,(typeof(x))(a)-1)
+#define ALIGN_MASK(x,mask)    (((x)+(mask))&~(mask))
+
 
 /* On Ubuntu LINUX_VERSION_CODE doesn't correspond to info.release,
  * but Ubuntu provides /proc/version_signature file, as described at
@@ -77,10 +84,71 @@ static __u32 get_debian_kernel_version(struct utsname *info)
 	return KERNEL_VERSION(major, minor, patch);
 }
 
+// Customization:
+// Another approach, get kernel version from vdso 'note' section
+// Should be more robust detecting actual RUNNING kernel version
+// NOTE: 64bit only (can support 32bit by adjusting ELF types)
+static __u32 get_kernel_version_vdso_x64()
+{
+    int i = 0;
+    __u32 kversion = 0;
+
+    unsigned long vdso_base = getauxval(AT_SYSINFO_EHDR);
+    if (vdso_base == 0) {
+        pr_warn("getauxval failed: %s\n", strerror(errno));
+        goto done;
+    }
+
+    Elf64_Ehdr * ehdr = (Elf64_Ehdr *)vdso_base;
+    if (memcmp(ehdr, ELFMAG, 4)) {
+        pr_warn("invalid elf format");
+        goto done;
+    }
+
+    for (i = 0; i < ehdr->e_shnum; ++i) {
+        Elf64_Shdr * shdr = (Elf64_Shdr *)(vdso_base + ehdr->e_shoff + i * ehdr->e_shentsize);
+
+        if (shdr->sh_type != SHT_NOTE) {
+            continue;
+        }
+
+        // Iterate all notes in note section, to find LINUX_VERSION_CODE
+        char * p = (char *)(vdso_base + shdr->sh_offset);
+        char * p_end = p + shdr->sh_size;
+
+        while (p < p_end) {
+            Elf64_Nhdr * nhdr = (Elf64_Nhdr *)p;
+
+            // IMPORTANT: must NOT use 'name','desc'
+            //            before verifying 'n_namesz', 'n_descsz' (see below condition)
+            void * name = p + sizeof(*nhdr);
+            void * desc = p + sizeof(*nhdr) + ALIGN_UP(nhdr->n_namesz, 4);
+
+            if (nhdr->n_namesz > 5            &&
+                memcmp(name, "Linux", 5) == 0 &&
+                nhdr->n_descsz == 4           &&
+                nhdr->n_type == 0) {
+                kversion = *(uint32_t *)desc;
+                goto done;
+            }
+
+            // next note (refer to elf(5) manpage)
+            p += sizeof(*nhdr) + ALIGN_UP(nhdr->n_namesz, 4) + ALIGN_UP(nhdr->n_descsz, 4);
+        }
+    }
+
+done:
+    return kversion;
+}
+
 __u32 get_kernel_version(void)
 {
 	__u32 major, minor, patch, version;
 	struct utsname info;
+
+	version = get_kernel_version_vdso_x64();
+	if (version != 0)
+		return version;
 
 	/* Check if this is an Ubuntu kernel. */
 	version = get_ubuntu_kernel_version();
