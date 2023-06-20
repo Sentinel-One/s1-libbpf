@@ -42,6 +42,11 @@
 #include "libbpf.h"
 #include "btf.h"
 
+// Customization:
+// was fcntl64@GLIBC_2.28,
+// enforce symbol version as linux agent works with GLIBC_2.19
+__asm__(".symver fcntl64,fcntl@GLIBC_2.2.5");
+
 #ifndef EM_BPF
 #define EM_BPF 247
 #endif
