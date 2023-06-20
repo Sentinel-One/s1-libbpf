@@ -64,6 +64,11 @@
 __asm__(".symver fmemopen,fmemopen@GLIBC_2.2.5");
 #endif
 
+// Customization:
+// was fcntl64@GLIBC_2.28,
+// enforce symbol version as linux agent works with GLIBC_2.19
+__asm__(".symver fcntl64,fcntl@GLIBC_2.2.5");
+
 #ifndef BPF_FS_MAGIC
 #define BPF_FS_MAGIC		0xcafe4a11
 #endif
