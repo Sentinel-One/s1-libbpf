@@ -68,6 +68,10 @@ __asm__(".symver fmemopen,fmemopen@GLIBC_2.2.5");
 // enforce symbol version as linux agent works with GLIBC_2.19
 __asm__(".symver fcntl64,fcntl@GLIBC_2.2.5");
 
+// Customization:
+bool use_default_tracefs_location = true;
+char tracefs_customized_location[256] = {0};
+
 #ifndef BPF_FS_MAGIC
 #define BPF_FS_MAGIC		0xcafe4a11
 #endif
@@ -8484,6 +8488,7 @@ const char *bpf_program__section_name(const struct bpf_program *prog)
 	return prog->sec_name;
 }
 
+// Customization
 void bpf_program__set_section_name(struct bpf_program *prog, const char *new_sec_name)
 {
     if (!prog || !new_sec_name) {
@@ -10135,17 +10140,74 @@ static bool use_debugfs(void)
 
 static const char *tracefs_path(void)
 {
+	// Customization
+	if (!use_default_tracefs_location)
+		return tracefs_customized_location;
+
 	return use_debugfs() ? DEBUGFS : TRACEFS;
+}
+
+// Customization:
+static const char * join_with_tracefs_path(const char * file)
+{
+	char buf[STRERR_BUFSIZE];
+	int err, ret;
+	static char path[sizeof(tracefs_customized_location) + 64] = {0};
+
+	if (file == NULL) {
+		return NULL;
+	}
+
+	ret = snprintf(path, sizeof(path),
+				   "%s/%s",
+				   tracefs_path(), file);
+	if (ret < 0) {
+		err = -errno;
+		pr_warn("join_with_tracefs_path failed: %s\n",
+				libbpf_strerror_r(err, buf, sizeof(buf)));
+		return NULL;
+	}
+
+	return path;
 }
 
 static const char *tracefs_kprobe_events(void)
 {
-	return use_debugfs() ? DEBUGFS"/kprobe_events" : TRACEFS"/kprobe_events";
+	return join_with_tracefs_path("kprobe_events");
 }
 
 static const char *tracefs_uprobe_events(void)
 {
-	return use_debugfs() ? DEBUGFS"/uprobe_events" : TRACEFS"/uprobe_events";
+	return join_with_tracefs_path("uprobe_events");
+}
+
+// Customization
+bool libbpf_set_once_tracefs_location_unsafe(const char * path)
+{
+	if (!use_default_tracefs_location) {
+		pr_warn("set_once_tracefs_location() was already called to use %s\n",
+				tracefs_path());
+		return false;
+	}
+
+	size_t n = strlen(path);
+
+	if (path == NULL || n == 0) {
+		pr_warn("set_once_tracefs_location: failed, null/empty path, using %s\n",
+				tracefs_path());
+		return false;
+	} else if (sizeof(tracefs_customized_location) <= n) {
+		pr_warn("set_once_tracefs_location: failed, path too long, using %s\n",
+				tracefs_path());
+		return false;
+	}
+
+	strcpy(tracefs_customized_location, path);
+	use_default_tracefs_location = false;
+
+	pr_info("customized tracefs location: %s\n", tracefs_path());
+
+	return true;
 }
 
 static void gen_kprobe_legacy_event_name(char *buf, size_t buf_sz,
