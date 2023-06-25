@@ -1955,6 +1955,14 @@ LIBBPF_API int libbpf_register_prog_handler(const char *sec,
  */
 LIBBPF_API int libbpf_unregister_prog_handler(int handler_id);
 
+// Customization:
+/*
+ * Sets bpf_program 'sec_name' attribute.
+ * Enables in runtime to configure which symbol to hook on the eBPF program
+ * For example: support symbols with 'isra' suffix
+ */
+LIBBPF_API void bpf_program__set_section_name(struct bpf_program *prog, const char *new_sec_name);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif
