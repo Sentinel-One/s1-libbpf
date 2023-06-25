@@ -9077,6 +9077,18 @@ const char *bpf_program__section_name(const struct bpf_program *prog)
 	return prog->sec_name;
 }
 
+void bpf_program__set_section_name(struct bpf_program *prog, const char *new_sec_name)
+{
+    if (!prog || !new_sec_name) {
+        pr_warn("bpf_program__set_section_name: 'prog' and/or 'new_sec_name' are NULL\n");
+        return;
+    }
+
+    zfree(&prog->sec_name);
+    prog->sec_name = strdup(new_sec_name);
+    pr_info("bpf_program__set_section_name: updated prog->sec_name: %s\n", prog->sec_name);
+}
+
 bool bpf_program__autoload(const struct bpf_program *prog)
 {
 	return prog->autoload;
@@ -10603,6 +10615,13 @@ struct bpf_link_perf {
 	bool legacy_is_retprobe;
 };
 
+// Customization
+// Check if symbol contains 'isra' suffix
+static bool isra_symbol(const char * symbol)
+{
+	return strstr(symbol, ".isra") != NULL;
+}
+
 static int remove_kprobe_event_legacy(const char *probe_name, bool retprobe);
 static int remove_uprobe_event_legacy(const char *probe_name, bool retprobe);
 
@@ -11063,6 +11082,26 @@ bpf_program__attach_kprobe_opts(const struct bpf_program *prog,
 	pe_opts.bpf_cookie = OPTS_GET(opts, bpf_cookie, 0);
 
 	legacy = determine_kprobe_perf_type() < 0;
+
+	// Customization:
+	if (isra_symbol(func_name)) {
+		// kprobe definition (from kernel kprobes doc):
+		//     'p[:[GRP/]EVENT] [MOD:]SYM[+offs]|MEMADDR [FETCHARGS]'
+		//
+		// There are distros (like, CentOS 8.3) which fail to hook if the EVENT contains '.',
+		// which is a common scenario with 'isra' suffix symbols, so need to replace '.' with '_'.
+		//
+		// In dynamic PMU it's not possible to set the event name,
+		// to ensure symbol doesnt contain '.' (refer to make_isra_symbol_comp() doc),
+		// so enforcing legacy mode
+		//
+		// NOTE:
+		//   Refer to gen_kprobe_legacy_event_name() logic which sanitizes probe name
+		//   by replacing any non alphanumeric character to '_' character
+		pr_info("%s contains '.isra' symbol, enforcing legacy mode\n", func_name);
+		legacy = true;
+	}
+
 	switch (attach_mode) {
 	case PROBE_ATTACH_MODE_LEGACY:
 		legacy = true;
