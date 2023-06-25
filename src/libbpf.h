@@ -1674,6 +1674,14 @@ LIBBPF_API bool libbpf_probe_set_prog_type(enum bpf_prog_type type);
  */
 LIBBPF_API enum bpf_prog_type libbpf_probe_get_prog_type(enum bpf_prog_type default_type);
 
+// Customization:
+/*
+ * Sets bpf_program 'sec_name' attribute.
+ * Enables in runtime to configure which symbol to hook on the eBPF program
+ * For example: support symbols with 'isra' suffix
+ */
+LIBBPF_API void bpf_program__set_section_name(struct bpf_program *prog, const char *new_sec_name);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif
