@@ -1963,6 +1963,10 @@ LIBBPF_API int libbpf_unregister_prog_handler(int handler_id);
  */
 LIBBPF_API void bpf_program__set_section_name(struct bpf_program *prog, const char *new_sec_name);
 
+// Customization:
+// NOTE: not thread safe, assuming it's done once during initialization
+LIBBPF_API bool libbpf_set_once_tracefs_location_unsafe(const char * path);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif
