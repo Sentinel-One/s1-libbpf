@@ -390,4 +390,8 @@ LIBBPF_1.2.0 {
 		bpf_link_get_info_by_fd;
 		bpf_map_get_info_by_fd;
 		bpf_prog_get_info_by_fd;
+		libbpf_probe_set_prog_type;
+		libbpf_probe_get_prog_type;
+		bpf_program__set_section_name;
+		libbpf_set_once_tracefs_location_unsafe;
 } LIBBPF_1.1.0;
