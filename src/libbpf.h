@@ -1867,6 +1867,10 @@ LIBBPF_API enum bpf_prog_type libbpf_probe_get_prog_type(enum bpf_prog_type defa
  */
 LIBBPF_API void bpf_program__set_section_name(struct bpf_program *prog, const char *new_sec_name);
 
+// Customization:
+// NOTE: not thread safe, assuming it's done once during initialization
+LIBBPF_API bool libbpf_set_once_tracefs_location_unsafe(const char * path);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif
