@@ -109,6 +109,18 @@ LIBBPF_API libbpf_print_fn_t libbpf_set_print(libbpf_print_fn_t fn);
 /* Hide internal to user */
 struct bpf_object;
 
+struct const_rewrite_entry
+{
+	const char *symbol;
+	__u32 value;
+};
+
+struct consts_rewrite
+{
+	size_t num_entries;
+	struct const_rewrite_entry *entries;
+};
+
 struct bpf_object_open_opts {
 	/* size of this struct, for forward/backward compatibility */
 	size_t sz;
@@ -177,10 +189,11 @@ struct bpf_object_open_opts {
 	 * logs through its print callback.
 	 */
 	__u32 kernel_log_level;
-
+	/* Symbol list to resolve in load time. */
+	struct consts_rewrite *consts_rewrite;
 	size_t :0;
 };
-#define bpf_object_open_opts__last_field kernel_log_level
+#define bpf_object_open_opts__last_field consts_rewrite
 
 /**
  * @brief **bpf_object__open()** creates a bpf_object by opening
