@@ -598,6 +598,7 @@ enum extern_type {
 	EXT_UNKNOWN,
 	EXT_KCFG,
 	EXT_KSYM,
+	EXT_S1,
 };
 
 enum kcfg_type {
@@ -641,6 +642,9 @@ struct extern_desc {
 			 */
 			__s16 btf_fd_idx;
 		} ksym;
+		struct {
+			__u64 default_value;
+		} s1;
 	};
 };
 
@@ -711,6 +715,8 @@ struct bpf_object {
 	struct extern_desc *externs;
 	int nr_extern;
 	int kconfig_map_idx;
+
+	struct hashmap *consts;
 
 	bool has_subcalls;
 	bool has_rodata;
@@ -4270,6 +4276,16 @@ static int bpf_object__collect_externs(struct bpf_object *obj)
 		memset(ext, 0, sizeof(*ext));
 		obj->nr_extern++;
 
+		if (strncmp(ext_name, "s1_", sizeof("s1_")-1) == 0) {
+			ext->type = EXT_S1;
+			ext->name = strdup(ext_name);
+			ext->s1.default_value = 0;
+			ext->sym_idx = i;
+			ext->is_set = true;
+			ext->is_weak = false;
+			continue;
+		}
+
 		ext->btf_id = find_extern_btf_id(obj->btf, ext_name);
 		if (ext->btf_id <= 0) {
 			pr_warn("failed to find BTF for extern '%s': %d\n",
@@ -4525,13 +4541,16 @@ static int bpf_program__record_reloc(struct bpf_program *prog,
 		int sym_idx = ELF64_R_SYM(rel->r_info);
 		int i, n = obj->nr_extern;
 		struct extern_desc *ext;
+		bool is_s1_extern = false;
 
 		for (i = 0; i < n; i++) {
 			ext = &obj->externs[i];
+			if (ext->type == EXT_S1)
+				is_s1_extern = true;
 			if (ext->sym_idx == sym_idx)
 				break;
 		}
-		if (i >= n) {
+		if (i >= n && !is_s1_extern) {
 			pr_warn("prog '%s': extern relo failed to find extern for '%s' (%d)\n",
 				prog->name, sym_name, sym_idx);
 			return -LIBBPF_ERRNO__RELOC;
@@ -6173,6 +6192,21 @@ bpf_object__relocate_data(struct bpf_object *obj, struct bpf_program *prog)
 					insn[0].imm = obj->maps[obj->kconfig_map_idx].fd;
 				}
 				insn[1].imm = ext->kcfg.data_off;
+			} else if (ext->type == EXT_S1) {
+				if (!obj->consts) {
+					pr_warn("prog '%s': no const externs\n", prog->name);
+					return -EINVAL;
+				}
+				void *result = NULL;
+				if (!hashmap__find(obj->consts, ext->name, &result)) {
+					pr_warn("prog '%s': couldn't resolve const extern '%s'\n",
+							prog->name, ext->name);
+					return -EINVAL;
+				}
+				__u32 val = (__u32)(long)result;
+				pr_debug("relocate_data: prog '%s': extern='%s', val=0x%X\n",
+						 prog->name, ext->name, val);
+				insn[0].imm = val;
 			} else /* EXT_KSYM */ {
 				if (ext->ksym.type_id && ext->is_set) { /* typed ksyms */
 					insn[0].src_reg = BPF_PSEUDO_BTF_ID;
@@ -8009,6 +8043,16 @@ static int bpf_object_init_progs(struct bpf_object *obj, const struct bpf_object
 	return 0;
 }
 
+static size_t str_hash_fn(long key, void *ctx)
+{
+	return str_hash((const char *)key);
+}
+
+static bool str_equal_fn(long key1, long key2, void *ctx)
+{
+	return strcmp((const char *)key1, (const char *)key2) == 0;
+}
+
 static struct bpf_object *bpf_object_open(const char *path, const void *obj_buf, size_t obj_buf_sz,
 					  const char *obj_name,
 					  const struct bpf_object_open_opts *opts)
@@ -8094,6 +8138,34 @@ static struct bpf_object *bpf_object_open(const char *path, const void *obj_buf,
 			err = -ENOMEM;
 			goto out;
 		}
+	}
+
+	struct consts_rewrite *consts_rewrite = OPTS_GET(opts, consts_rewrite, NULL);
+	if (consts_rewrite) {
+		 obj->consts = hashmap__new(str_hash_fn, str_equal_fn, NULL);
+		 if (IS_ERR(obj->consts)) {
+			 pr_warn("error in initializing const rewrite hashmap\n");
+			 err = PTR_ERR(obj->consts);
+			 obj->consts = NULL;
+			 goto out;
+		 }
+
+		 int i = 0;
+		 for (i = 0; i < consts_rewrite->num_entries; ++i) {
+			 struct const_rewrite_entry *entry = &consts_rewrite->entries[i];
+			 err = hashmap__append(obj->consts, (void *)entry->symbol, (void *)(long)entry->value);
+			 if (err) {
+				 pr_warn("error in loading user provided const rewrites\n");
+				 goto out;
+			 }
+		 }
+		 if (!hashmap__find(obj->consts, "s1_kernel_version", NULL)) {
+			 err = hashmap__append(obj->consts, "s1_kernel_version", (void *)(long)obj->kern_version);
+			 if (err) {
+				 pr_warn("error in loading s1_kernel_version const\n");
+				 goto out;
+			 }
+		 }
 	}
 
 	err = bpf_object__elf_init(obj);
@@ -8500,6 +8572,7 @@ static int bpf_object__resolve_externs(struct bpf_object *obj,
 				return err;
 			pr_debug("extern (kcfg) '%s': set to 0x%llx\n",
 				 ext->name, (long long)value);
+		} else if (ext->type == EXT_S1) {
 		} else {
 			pr_warn("extern '%s': unrecognized extern kind\n", ext->name);
 			return -EINVAL;
@@ -9171,6 +9244,8 @@ void bpf_object__close(struct bpf_object *obj)
 	btf__free(obj->btf);
 	btf__free(obj->btf_vmlinux);
 	btf_ext__free(obj->btf_ext);
+
+	hashmap__free(obj->consts);
 
 	for (i = 0; i < obj->nr_maps; i++)
 		bpf_map__destroy(&obj->maps[i]);
