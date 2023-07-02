@@ -46,7 +46,11 @@
 // Customization:
 // was fcntl64@GLIBC_2.28,
 // enforce symbol version as linux agent works with GLIBC_2.19
+#if !defined(aarch64)
 __asm__(".symver fcntl64,fcntl@GLIBC_2.2.5");
+#elif defined(aarch64)
+__asm__(".symver fcntl64,fcntl@GLIBC_2.17");
+#endif
 
 #ifndef EM_BPF
 #define EM_BPF 247
