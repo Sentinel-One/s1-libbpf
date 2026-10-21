@@ -6207,10 +6207,12 @@ bpf_object__relocate_data(struct bpf_object *obj, struct bpf_program *prog)
 							prog->name, ext->name);
 					return -EINVAL;
 				}
-				__u32 val = (__u32)(long)result;
-				pr_debug("relocate_data: prog '%s': extern='%s', val=0x%X\n",
-						 prog->name, ext->name, val);
-				insn[0].imm = val;
+				/* ld_imm64: low 32 bits in insn[0].imm, high 32 bits in insn[1].imm */
+				__u64 val = (__u64)(long)result;
+				pr_debug("relocate_data: prog '%s': extern='%s', val=0x%llX\n",
+						 prog->name, ext->name, (unsigned long long)val);
+				insn[0].imm = (__u32)val;
+				insn[1].imm = val >> 32;
 			} else /* EXT_KSYM */ {
 				if (ext->ksym.type_id && ext->is_set) { /* typed ksyms */
 					insn[0].src_reg = BPF_PSEUDO_BTF_ID;

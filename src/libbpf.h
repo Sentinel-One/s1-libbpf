@@ -115,7 +115,7 @@ struct bpf_object;
 struct const_rewrite_entry
 {
 	const char *symbol;
-	__u32 value;
+	__u64 value;
 };
 
 struct consts_rewrite
